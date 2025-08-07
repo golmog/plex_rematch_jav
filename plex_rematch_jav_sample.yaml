@@ -1,0 +1,78 @@
+# plex_rematch_jav.yaml
+# ======================================================================
+# Plex Rematch JAV 스크립트 설정 파일
+# ======================================================================
+
+# --- 필수 설정 ---
+# 스크립트 실행에 반드시 필요한 값들입니다.
+# 실제 환경에 맞게 경로와 토큰을 수정해주세요.
+
+# Plex 데이터베이스 파일의 전체 경로
+PLEX_DB: "/PATH/TO/YOUR/PLEX/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+
+# Plex 서버 접속 URL (예: http://localhost:32400, http://192.168.1.10:32400)
+PLEX_URL: "http://127.0.0.1:32400"
+
+# Plex 접근 토큰 (Plex 서버에서 확인 가능)
+PLEX_TOKEN: "_YOUR_PLEX_TOKEN_" # !!! 반드시 실제 유효한 토큰으로 변경하세요 !!!
+
+
+# --- 선택적 설정 ---
+# 값을 지정하지 않으면 스크립트 내의 FALLBACK 기본값 또는 명령행 인자 기본값이 사용됩니다.
+# 특정 설정을 스크립트 기본값으로 사용하고 싶다면 해당 라인을 주석 처리(#) 하거나 삭제하세요.
+
+# 완료된 작업 기록용 데이터베이스 파일 경로
+# 스크립트 실행 위치에 상대 경로로 지정하거나, 절대 경로로 지정할 수 있습니다.
+COMPLETION_DB: "plex_rematch_jav.db"
+# 예시 (절대 경로): COMPLETION_DB: "/home/user/scripts/plex_rematch_jav.db"
+
+# 동시에 실행할 작업자(워커) 수 (자동 재매칭 모드용)
+WORKERS: 2
+
+# 각 아이템 처리 후 다음 아이템 처리 전 대기 시간 (초)
+# API 요청이 너무 잦아 발생하는 문제를 피하기 위해 사용합니다.
+MATCH_INTERVAL: 2
+
+# 처리할 최대 아이템 개수 (0이면 무제한)
+# 자동 모드, 인터랙티브 검색 모드, fix-labels 모드 각각 독립적으로 적용됩니다.
+MATCH_LIMIT: 0 # 테스트 시 작은 값으로 설정 유용 (예: 10)
+
+# Plex API 매칭 후보의 최소 점수 (0-100)
+# 이 점수 미만인 후보는 자동 선택에서 제외됩니다.
+SCORE_MIN: 95
+
+# 스캔 관련 설정
+SCAN_DEPTH: 2
+SCAN_PATH_MAPPING_ENABLED: False
+SCAN_PATH_MAP: "/path/on/script_host:/path/on/plex_host" # "/path/on/script_host:/path/on/plex_host" 세미콜론 구분으로 여러 경로 매핑 가능
+
+# --- 고급 설정 (필요시 조절) ---
+
+# 메타데이터 업데이트 후 Plex DB 반영 확인 시도 횟수
+CHECK_COUNT: 10
+
+# 메타데이터 업데이트 후 Plex DB 반영 확인 간격 (초)
+CHECK_INTERVAL: 3
+
+# Plex API GET 요청 타임아웃 (초)
+REQUESTS_TIMEOUT_GET: 30
+
+# Plex API PUT 요청 타임아웃 (초)
+REQUESTS_TIMEOUT_PUT: 60
+
+# 품번의 숫자 부분을 0으로 패딩할 때 목표 길이 (비교용이므로 조정할 필요 없음)
+# 예: 123 -> 0000123 (NUMERIC_PADDING_LENGTH: 7 인 경우)
+NUMERIC_PADDING_LENGTH: 7
+
+
+# --- 명령행 옵션으로 주로 제어되는 설정들 ---
+# 아래 항목들은 보통 YAML 파일에 설정하기보다는,
+# 스크립트 실행 시 명령행 옵션으로 필요에 따라 지정하는 것이 일반적입니다.
+# 특정 시나리오에서 항상 특정 옵션을 활성화하고 싶다면 여기에 설정할 수 있습니다.
+# (DRY_RUN, FORCE_REMATCH, INCLUDE_COMPLETED, FIX_LABELS, MANUAL_SEARCH)
+
+# 예시: 항상 드라이런으로 실행하고 싶다면
+# DRY_RUN: true
+
+# 예시: 항상 완료된 항목도 포함하고 싶다면
+# INCLUDE_COMPLETED: true
