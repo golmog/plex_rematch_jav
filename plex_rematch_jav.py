@@ -17,6 +17,7 @@ import os
 import re
 import logging
 import signal
+from typing import List, Optional, Tuple, Union
 
 try:
     import yaml
@@ -142,7 +143,7 @@ def handle_signal(sig, frame):
             print(msg)
         sys.exit(1)
 
-def natural_sort_key(s: str) -> list:
+def natural_sort_key(s: str) -> List[Union[str, int]]:
     """
     자연 정렬(Natural Sort)을 위한 정렬 키를 생성합니다.
     예: "abp-101" -> ['abp-', 101, '']
@@ -189,18 +190,18 @@ def require_cursor(db_path_key: str, read_only: bool = False):
     return decorator
 
 @require_cursor("PLEX_DB", read_only=True)
-def list_library_sections_from_db(cs: sqlite3.Cursor, args_namespace=None) -> list[sqlite3.Row]:
+def list_library_sections_from_db(cs: sqlite3.Cursor, args_namespace=None) -> List[sqlite3.Row]:
     query = "SELECT id, name, section_type, agent, scanner, language FROM library_sections ORDER BY name ASC"
     return cs.execute(query).fetchall()
 
 @require_cursor("PLEX_DB", read_only=True)
-def fetch_all(query_template: str, params: tuple = None, cs: sqlite3.Cursor = None) -> list[dict]: # 반환 타입을 list[dict]로 명시
+def fetch_all(query_template: str, params: tuple = None, cs: sqlite3.Cursor = None) -> List[dict]:
     logger.debug(f"DB Query (all): {query_template[:100]}... | Params: {params}")
     rows = cs.execute(query_template, params or ()).fetchall()
     return [dict(row) for row in rows] if rows else []
 
 @require_cursor("PLEX_DB", read_only=True)
-def fetch_one(query_template: str, params: tuple = None, cs: sqlite3.Cursor = None) -> dict | None: # 반환 타입을 dict | None 으로 명시
+def fetch_one(query_template: str, params: tuple = None, cs: sqlite3.Cursor = None) -> Optional[dict]:
     logger.debug(f"DB Query (one): {query_template[:100]}... | Params: {params}")
     row = cs.execute(query_template, params or ()).fetchone()
     return dict(row) if row else None
@@ -219,11 +220,11 @@ def is_task_completed(metadata_id: int, cs: sqlite3.Cursor = None) -> bool:
     return cs.execute("SELECT 1 FROM completed_tasks WHERE metadata_id = ? AND status LIKE 'COMPLETED%'", (metadata_id,)).fetchone() is not None
 
 @require_cursor("COMPLETION_DB", read_only=True)
-def get_completed_task_info(metadata_id: int, cs: sqlite3.Cursor = None) -> sqlite3.Row | None:
+def get_completed_task_info(metadata_id: int, cs: sqlite3.Cursor = None) -> Optional[sqlite3.Row]:
     return cs.execute("SELECT metadata_id, status, matched_guid, completed_at FROM completed_tasks WHERE metadata_id = ?", (metadata_id,)).fetchone()
 
 @require_cursor("PLEX_DB", read_only=True)
-def get_media_file_path(metadata_id: int, cs: sqlite3.Cursor = None) -> str | None:
+def get_media_file_path(metadata_id: int, cs: sqlite3.Cursor = None) -> Optional[str]:
     query = "SELECT mp.file FROM media_parts mp JOIN media_items mi ON mp.media_item_id = mi.id WHERE mi.metadata_item_id = ? ORDER BY mi.id, mp.id LIMIT 1;"
     row = cs.execute(query, (metadata_id,)).fetchone()
     return row['file'] if row and 'file' in row.keys() and row['file'] else None
@@ -274,7 +275,7 @@ def format_numeric_for_search(num_str: str, min_digits: int = 3) -> str:
     return formatted_num + trailing_alpha
 
 
-def extract_product_id_from_filename(filename: str) -> str | None:
+def extract_product_id_from_filename(filename: str) -> Optional[str]:
     if not filename: return None
     padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 7)
     t_series_numbers_pattern = "(18|24|28|34|38)" # T-시리즈 숫자 목록
@@ -331,7 +332,7 @@ def extract_product_id_from_filename(filename: str) -> str | None:
     return None
 
 
-def extract_product_id_from_title(title: str, original_file_pid_parts: tuple[str, str] | None = None) -> str | None:
+def extract_product_id_from_title(title: str, original_file_pid_parts: Optional[Tuple[str, str]] = None) -> Optional[str]:
     if not title: return None
     normalized_title = title.upper()
     padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 7)
@@ -470,7 +471,7 @@ def extract_product_id_from_title(title: str, original_file_pid_parts: tuple[str
     return None
 
 
-def normalize_pid_for_comparison(pid_alpha_hyphen_padded_num: str) -> str | None:
+def normalize_pid_for_comparison(pid_alpha_hyphen_padded_num: str) -> Optional[str]:
     if not pid_alpha_hyphen_padded_num:
         return None
 
@@ -1278,7 +1279,7 @@ async def process_single_item_for_auto_rematch(item_row: sqlite3.Row, worker_nam
 async def run_manual_interactive_rematch_for_item(
     item_data: dict,
     calling_mode_tag: str = "MANUAL"
-) -> tuple[bool, str | None]:
+) -> Tuple[bool, Optional[str]]:
 
     global SHUTDOWN_REQUESTED, CONFIG
 
