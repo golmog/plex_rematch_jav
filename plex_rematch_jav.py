@@ -1565,7 +1565,7 @@ async def run_interactive_search_and_rematch_mode(args):
     header_fmt_search = "{idx:<5s} {id:<7s} | {guid_display:<20s} | {site:<8s}"
     header_title_part_search = "제목 (DB)" # 너비는 유동적이므로 따로 관리
     # 여기서는 전체 너비를 대략적으로 맞추기 위해 print("-" * 110) 사용
-    print(f"{header_fmt_search.format(idx="No.", id="ID", guid_display="GUID", site="SITE")} | {header_title_part_search}")
+    print(f"{header_fmt_search.format(idx='No.', id='ID', guid_display='GUID', site='SITE')} | {header_title_part_search}")
     print("-" * (len(header_fmt_search.format(idx="", id="", guid_display="", site="")) + 3 + 50 )) # 제목 너비 대략 50으로 가정
 
     for i_s_row, db_row_searched_item in enumerate(search_result_rows):
