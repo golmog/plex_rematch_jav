@@ -1,5 +1,14 @@
 # Plex JAV Rematch (plex_rematch_jav.py)
 
+**최종 업데이트: 2025-08-11**
+
+-   **신규 기능**: `--move-no-meta` 옵션 추가 (미매칭 파일 이동 및 라이브러리 정리 기능)
+-   **신규 기능**: `--scan-at-once` 옵션 추가 (대기 없는 즉시 스캔 요청 기능)
+-   **개선 사항**: 라이브러리 스캔 시, 진행률 외에 현재 활동 종류와 파일 경로를 상세히 로깅하도록 개선
+-   **문서 개선**: 모든 세부 실행 옵션에 대한 설명을 `README.md`에 추가
+
+---
+
 Plex에 등록된 JAV 라이브러리의 메타데이터를 효율적으로 수정하고 재매칭하기 위한 파이썬 스크립트입니다. 파일명을 기반으로 정확한 품번을 추출하여 Plex의 검색 기능을 통해 올바른 메타데이터를 찾고, 잘못 매칭되었거나 정보가 부족한 항목들을 자동으로 또는 인터랙티브하게 수정합니다.
 
 ## 주요 기능
@@ -9,8 +18,11 @@ Plex에 등록된 JAV 라이브러리의 메타데이터를 효율적으로 수�
     -   **품번 수정 (`--fix-labels`)**: 파일명과 Plex 제목의 품번이 일치하지 않거나, 미매칭된 항목들을 찾아 목록을 보여주고, 사용자가 직접 올바른 메타데이터를 선택하여 수정할 수 있습니다.
     -   **포스터 없는 항목 처리 (`--no-poster`)**: 포스터가 없거나 임시 썸네일로 지정된 항목들을 찾아 재매칭을 유도합니다.
     -   **검색 및 재매칭 (`--search`)**: 특정 키워드로 라이브러리를 검색하여 나온 결과를 대상으로 재매칭을 진행합니다.
+    -   **미매칭 파일 이동 (`--move-no-meta`)**: 매칭되지 않은 미디어 파일을 설정된 경로로 이동시키고 라이브러리에서 제거하여 라이브러리를 정리합니다.
 -   **Plex Dance 자동화**: 메타데이터가 심하게 꼬인 항목에 대해 라이브러리에서 아이템을 완전히 제거했다가 다시 추가하는 "Plex Dance" 과정을 자동화하여 문제를 해결합니다.
--   **분할 스캔 (`--scan-full`)**: 대용량 라이브러리 스캔 시 Plex 서버에 과부하가 걸리는 것을 방지하기 위해, 라이브러리 경로를 지정된 깊이(depth)의 하위 폴더 단위로 나누어 순차적으로 스캔합니다.
+-   **라이브러리 스캔**:
+    -   **분할 스캔 (`--scan-full`)**: 대용량 라이브러리 스캔 시 Plex 서버에 과부하가 걸리는 것을 방지하기 위해, 라이브러리 경로를 지정된 깊이(depth)의 하위 폴더 단위로 나누어 순차적으로 스캔합니다.
+    -   **상세한 스캔 상태 로깅**: 스캔 진행률 뿐만 아니라 현재 처리 중인 활동 종류와 상세 정보를 로그에 표시하여 멈춤 현상인지 정상 처리 중인지 명확히 알 수 있습니다.
 -   **설정 파일 지원**: `YAML` 형식의 설정 파일을 통해 Plex 서버 정보, 작업 옵션 등을 쉽게 관리할 수 있습니다.
 -   **Dry Run 지원**: `--dry-run` 옵션을 통해 실제 변경 없이 어떤 작업이 수행될지 미리 확인할 수 있습니다.
 
@@ -44,39 +56,14 @@ Plex에 등록된 JAV 라이브러리의 메타데이터를 효율적으로 수�
 스크립트를 처음 실행하기 전에 설정 파일을 준비해야 합니다.
 
 1.  **설정 파일 생성**:
-    스크립트와 같은 디렉터리에 `plex_rematch_jav.yaml` 파일을 생성하고 아래 내용을 복사하여 붙여넣습니다.
-
-    ```yaml
-    # Plex 서버 정보 (필수)
-    PLEX_URL: "http://127.0.0.1:32400"  # 실제 Plex 서버 주소로 변경
-    PLEX_TOKEN: "YOUR_PLEX_TOKEN"      # 실제 Plex 토큰으로 변경
-    PLEX_DB: "/path/to/your/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db" # Plex DB 파일 경로
-
-    # 완료된 작업을 기록할 DB 파일 경로
-    COMPLETION_DB: "plex_rematch_jav.db"
-
-    # 작업자 및 시간 설정
-    WORKERS: 2                # 자동 재매칭 시 동시에 실행할 작업자 수
-    MATCH_INTERVAL: 2         # 각 아이템 처리 후 대기 시간 (초)
-    REQUESTS_TIMEOUT_GET: 30  # GET 요청 타임아웃 (초)
-    REQUESTS_TIMEOUT_PUT: 60  # PUT 요청 타임아웃 (초)
-
-    # 매칭 관련 설정
-    SCORE_MIN: 95             # 매칭 후보로 인정할 최소 점수 (0-100)
-    MATCH_LIMIT: 0            # 처리할 최대 아이템 수 (0이면 무제한)
-    NUMERIC_PADDING_LENGTH: 7 # 품번 숫자 부분의 0-패딩 목표 길이
-
-    # 스캔 관련 설정
-    SCAN_DEPTH: 2             # 분할 스캔 시 탐색할 하위 디렉터리 깊이
-    SCAN_PATH_MAPPING_ENABLED: false # 경로 변환 기능 활성화 여부
-    SCAN_PATH_MAP: "/host/path:/container/path" # 스크립트 실행 경로 -> Plex 컨테이너 경로
-    # 예시: /mnt/media:/data
-    ```
+    함께 제공되는 `plex_rematch_jav_sample.yaml` 파일을 `plex_rematch_jav.yaml`으로 복사하여 스크립트와 같은 디렉터리에 둡니다.
 
 2.  **필수 항목 수정**:
+    `plex_rematch_jav.yaml` 파일을 열어 아래 필수 항목들을 사용자의 환경에 맞게 수정하세요.
     -   `PLEX_URL`: 사용자의 Plex 서버 주소로 변경하세요.
     -   `PLEX_TOKEN`: [Finding your Plex authentication token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)을 참고하여 Plex 토큰을 찾아 입력하세요.
     -   `PLEX_DB`: 사용자의 Plex 데이터베이스 파일 경로를 정확하게 입력하세요. 경로는 운영체제 및 설치 방식에 따라 다릅니다.
+    -   `MOVE_NO_META_PATH`: `--move-no-meta` 옵션 사용 시, 파일을 이동시킬 경로를 지정합니다. 이 기능을 사용하지 않을 경우 비워두거나 주석 처리합니다.
 
 ## 사용법
 
@@ -99,23 +86,16 @@ python3 plex_rematch_jav.py --check-id
 python3 plex_rematch_jav.py --section-id 2
 ```
 
--   `--include-completed`: 이미 처리 완료된 항목도 다시 작업에 포함합니다.
--   `--force-rematch`: 현재 매칭 상태와 상관없이 강제로 언매치 후 재매칭을 시도합니다.
-
 ### 3. 인터랙티브 모드
 
-#### 품번 수정 (`--fix-labels`)
 
-품번이 파일명과 다르거나 미매칭된 아이템을 찾아 수정합니다.
+#### 품번 수정 (`--fix-labels`)
 
 ```bash
 python3 plex_rematch_jav.py --section-id 2 --fix-labels
 ```
-실행하면 문제 항목 목록이 나타나며, 처리할 항목 번호와 처리 방식(`자동`, `수동`, `Plex Dance`)을 선택할 수 있습니다.
 
 #### 포스터 없는 항목 처리 (`--no-poster`)
-
-포스터가 없거나 비정상적인 항목을 찾아 처리합니다.
 
 ```bash
 python3 plex_rematch_jav.py --section-id 2 --no-poster
@@ -123,21 +103,25 @@ python3 plex_rematch_jav.py --section-id 2 --no-poster
 
 #### 검색 후 재매칭 (`--search`)
 
-제목에 "ABCD-123"이 포함된 항목을 검색하여 재매칭을 진행합니다.
-
 ```bash
 python3 plex_rematch_jav.py --section-id 2 --search "ABCD-123"
 ```
+
 -   `--search-field`: 검색할 필드를 `title`(기본값), `label`, `site` 중에서 선택할 수 있습니다.
+
+#### 미매칭 파일 이동 (`--move-no-meta`)
+
+```bash
+python3 plex_rematch_jav.py --section-id 2 --move-no-meta
+```
 
 ### 4. 라이브러리 스캔
 
 #### 분할 스캔 (`--scan-full`)
 
-라이브러리를 설정된 `SCAN_DEPTH` 기준으로 나누어 순차적으로 스캔하여 서버 부하를 줄입니다.
+라이브러리 섹션 전체 경로를 설정된 `SCAN_DEPTH` 기준으로 나누어 순차적으로 스캔합니다.
 
 ```bash
-# 섹션 ID 2번 라이브러리 분할 스캔
 python3 plex_rematch_jav.py --section-id 2 --scan-full
 ```
 
@@ -146,14 +130,61 @@ python3 plex_rematch_jav.py --section-id 2 --scan-full
 지정한 특정 폴더만 스캔합니다.
 
 ```bash
+# 기본 동작: Plex 유휴 상태 확인 후, 스캔이 완료될 때까지 대기
 python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder"
+
+# 즉시 요청: Plex 상태와 관계없이 스캔 요청 후 바로 종료
+python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder" --scan-at-once
 ```
 
-### 일반 옵션
+### 5. 전체 옵션 목록
 
+아래 옵션들은 모든 모드 또는 특정 모드에서 동작을 세밀하게 제어할 때 사용합니다. `YAML` 설정 파일 또는 명령줄 인자로 지정할 수 있으며, 명령줄 인자가 우선 적용됩니다.
+
+#### 주요 작업 모드
+-   `--fix-labels`: 품번 불일치/미매칭 아이템을 찾아 수정하는 인터랙티브 모드를 실행합니다.
+-   `--no-poster`: 포스터가 없거나 비정상적인 아이템을 찾아 수정하는 인터랙랙티브 모드를 실행합니다.
+-   `--move-no-meta`: 미매칭 아이템을 지정된 경로로 이동하는 인터랙티브 모드를 실행합니다.
+-   `--search <키워드>`: 키워드로 아이템을 검색하여 재매칭하는 인터랙티브 모드를 실행합니다.
+-   `--scan-full`: 라이브러리 섹션의 전체 경로를 분할 스캔합니다.
+-   `--scan-path <경로>`: 지정된 경로만 스캔합니다.
+
+#### 작업 대상 필터링
+-   `--include <키워드>`: 제목/정렬제목에 `<키워드>`가 포함된 아이템만 작업 대상으로 합니다. (여러 번 사용 가능)
+-   `--exclude <키워드>`: 제목/정렬제목에 `<키워드>`가 포함된 아이템을 작업 대상에서 제외합니다. (여러 번 사용 가능)
+
+#### 동작 방식 제어
 -   `--dry-run`: 실제 변경 작업을 수행하지 않고 로그만 출력하여 테스트합니다.
--   `-v`, `-vv`: 로그 출력 수준을 높입니다. (디버깅 시 `-vv` 사용)
--   `--config`: 기본 `plex_rematch_jav.yaml` 외에 다른 설정 파일을 사용합니다.
+-   `--force-rematch`: 매칭 상태와 관계없이 강제로 언매치 후 재매칭을 시도합니다.
+-   `--include-completed`: 완료 DB에 기록된 아이템도 다시 작업 대상에 포함합니다.
+-   `--match-limit <숫자>`: 처리할 최대 아이템 수를 제한합니다. (0이면 무제한)
+-   `--match-interval <초>`: 각 아이템 처리 후 다음 아이템 처리까지 대기할 시간을 초 단위로 지정합니다.
+
+#### 매칭 로직 제어
+-   `--score-min <점수>`: 재매칭 시 후보로 인정할 최소 점수(0-100)를 지정합니다.
+-   `--manual-search`: Plex '일치항목 검색' 시 수동 모드(manual=1)로 더 많은 후보를 가져옵니다.
+-   `--numeric-padding-length <길이>`: 품번의 숫자 부분을 0으로 채울 때 목표 길이를 지정합니다.
+
+#### 스캔 세부 설정
+-   `--scan-at-once`: `--scan-path`와 함께 사용 시, Plex 상태를 확인하지 않고 즉시 스캔을 요청한 뒤 종료합니다.
+-   `--scan-depth <깊이>`: `--scan-full` 사용 시, 하위 폴더를 스캔할 기준 깊이를 지정합니다.
+
+#### 경로 및 연결 설정
+-   `--plex-db <경로>`: Plex 데이터베이스 파일의 절대 경로를 지정합니다. (YAML 설정보다 우선)
+-   `--plex-url <주소>`: Plex 서버의 URL을 지정합니다. (YAML 설정보다 우선)
+-   `--plex-token <토큰>`: Plex 인증 토큰을 지정합니다. (YAML 설정보다 우선)
+-   `--completion-db <경로>`: 완료된 작업 목록을 기록할 데이터베이스 파일 경로를 지정합니다.
+
+#### 성능 및 네트워크
+-   `--workers <숫자>`: 자동 재매칭 시 동시에 실행할 작업자(스레드) 수를 지정합니다.
+-   `--check-count <횟수>`: 재매칭 후 메타데이터 업데이트 반영을 확인하는 최대 횟수를 지정합니다.
+-   `--check-interval <초>`: 메타데이터 업데이트 확인 사이의 대기 시간을 초 단위로 지정합니다.
+-   `--timeout-get <초>`: API GET 요청의 타임아웃 시간을 초 단위로 지정합니다.
+-   `--timeout-put <초>`: API PUT 요청의 타임아웃 시간을 초 단위로 지정합니다.
+
+#### 설정 파일 및 로깅
+-   `--config <파일경로>`: 기본 `plex_rematch_jav.yaml` 외에 다른 설정 파일을 사용합니다.
+-   `-v`, `-vv`: 로그 출력 수준을 높입니다. 일반 정보는 `-v`, 상세 디버깅 정보는 `-vv`를 사용합니다.
 
 ## 기여
 
@@ -161,4 +192,4 @@ python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder"
 
 ## 면책 조항
 
-이 스크립트는 Plex 데이터베이스와 상호작용합니다. 사용하기 전에 **반드시 Plex 데이터베이스 파일을 백업**하세요. 스크립트 사용으로 인해 발생하는 데이터 손실이나 문제에 대해 제작자는 책임을 지지 않습니다. `--dry-run` 옵션을 통해 충분히 테스트한 후 사용하시기 바랍니다.
+이 스크립트는 Plex 데이터베이스와 상호작용하며 파일을 이동시킬 수 있습니다. 사용하기 전에 **반드시 Plex 데이터베이스 파일을 백업**하세요. 스크립트 사용으로 인해 발생하는 데이터 손실이나 문제에 대해 제작자는 책임을 지지 않습니다. `--dry-run` 옵션을 통해 충분히 테스트한 후 사용하시기 바랍니다.

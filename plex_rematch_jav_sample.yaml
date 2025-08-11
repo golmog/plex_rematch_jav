@@ -64,6 +64,9 @@ REQUESTS_TIMEOUT_PUT: 60
 # 예: 123 -> 0000123 (NUMERIC_PADDING_LENGTH: 7 인 경우)
 NUMERIC_PADDING_LENGTH: 7
 
+# --move-no-meta 옵션 사용 시, 파일을 이동할 절대 경로
+MOVE_NO_META_PATH: "/PATH/TO/MOVE/NO_META"
+
 
 # --- 명령행 옵션으로 주로 제어되는 설정들 ---
 # 아래 항목들은 보통 YAML 파일에 설정하기보다는,

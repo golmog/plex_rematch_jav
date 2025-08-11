@@ -10,14 +10,15 @@ import asyncio
 import urllib.parse
 import psutil
 import requests
-from datetime import datetime
 import argparse
 import sys
 import os
 import re
 import logging
 import signal
-from typing import List, Optional, Tuple, Union
+import shutil
+from datetime import datetime
+from typing import List, Optional, Tuple, Union, Any
 
 try:
     import yaml
@@ -68,6 +69,9 @@ FALLBACK_DEFAULT_CONFIG = {
     "INCLUDE_COMPLETED": False,
     "FIX_LABELS": False,
     "MANUAL_SEARCH": False,
+    "MOVE_NO_META_PATH": None,
+    "MOVE_NO_META": False,
+    "SCAN_AT_ONCE": False,
 }
 
 SITE_CODE_MAP = {
@@ -923,37 +927,56 @@ def map_scan_path(path: str) -> str:
     logger.debug(f"일치하는 경로 변환 규칙이 없어 원본 경로 반환: '{path}'")
     return path
 
-async def check_plex_activity() -> bool:
-    """Plex 서버가 현재 스캔/분석 등 라이브러리 관련 작업을 하고 있는지 확인합니다."""
+
+async def get_plex_library_activities(library_section: Any) -> List[Any]: # library_section 인자 추가
+    """Plex 서버의 현재 라이브러리 관련 활동 목록을 가져옵니다."""
     if not PLEXAPI_AVAILABLE:
         logger.error("plexapi 라이브러리가 없어 Plex 활동 상태를 확인할 수 없습니다.")
-        return True 
+        return []
+
+    # library_section 객체가 유효하지 않으면 빈 리스트 반환
+    if not library_section:
+        logger.warning("get_plex_library_activities 호출 시 library_section 객체가 없습니다.")
+        return []
 
     try:
-        def _check_activity_sync():
+        # --- _get_activities_sync 내부 로직 수정 ---
+        def _get_activities_sync() -> List[Any]:
+            all_activities = []
+
+            # 1. 전역 활동 확인 (기존 로직)
+            # PLEX_SERVER_INSTANCE는 이미 외부에서 생성되었으므로 그대로 사용
             global PLEX_SERVER_INSTANCE
-            
-            if PLEX_SERVER_INSTANCE is None:
-                logger.debug("PlexServer 인스턴스가 없어 새로 생성합니다 (in check_plex_activity).")
-                PLEX_SERVER_INSTANCE = PlexServer(CONFIG["PLEX_URL"], CONFIG["PLEX_TOKEN"])
-            
-            activities = PLEX_SERVER_INSTANCE.activities
-            for activity in activities:
-                if 'library' in activity.type or 'media' in activity.type:
-                    logger.info(f"Plex가 현재 활동 중입니다: {activity.title} ({activity.progress}%)")
-                    return True 
-            return False 
-        
-        return await await_sync(_check_activity_sync)
+            if PLEX_SERVER_INSTANCE:
+                server_activities = PLEX_SERVER_INSTANCE.activities
+                for activity in server_activities:
+                    activity_type_str = getattr(activity, 'type', '')
+                    if 'library' in activity_type_str or 'media' in activity_type_str:
+                        all_activities.append(activity)
+
+            # 2. 특정 라이브러리 섹션의 활동 확인 (새로 추가된 로직)
+            # library.reload()를 통해 최신 상태를 가져옵니다.
+            library_section.reload()
+            library_activity = getattr(library_section, 'activity', None)
+            if library_activity:
+                # 중복을 피하기 위해 이미 리스트에 없는 경우에만 추가
+                # 보통 activity 객체는 유일하므로 id 등으로 비교할 수 있으나, 간단히 객체 자체로 비교
+                if library_activity not in all_activities:
+                    all_activities.append(library_activity)
+
+            return all_activities
+
+        return await await_sync(_get_activities_sync)
 
     except Exception as e:
         logger.error(f"Plex 활동 상태 확인 중 오류: {e}", exc_info=False)
-        return True
+        return []
+
 
 async def run_scan_mode(args):
     """라이브러리 스캔 기능을 실행하는 메인 함수입니다."""
     global CONFIG, SHUTDOWN_REQUESTED, PLEX_SERVER_INSTANCE
-    
+
     section_id = CONFIG.get("ID")
     if not section_id:
         logger.error("스캔 모드에는 --section-id가 필수입니다.")
@@ -962,7 +985,7 @@ async def run_scan_mode(args):
     try:
         if PLEX_SERVER_INSTANCE is None:
             PLEX_SERVER_INSTANCE = PlexServer(CONFIG["PLEX_URL"], CONFIG["PLEX_TOKEN"])
-        
+
         library = await await_sync(PLEX_SERVER_INSTANCE.library.sectionByID, section_id)
     except PlexApiNotFound:
         logger.error(f"Plex에서 섹션 ID {section_id}를 찾을 수 없습니다.")
@@ -975,23 +998,71 @@ async def run_scan_mode(args):
     scan_path_specific = CONFIG.get("SCAN_PATH")
     if scan_path_specific:
         mapped_path = map_scan_path(scan_path_specific)
-        logger.info(f"지정된 단일 경로 스캔 시작: '{mapped_path}' (원본: '{scan_path_specific}')")
-        
-        logger.info("스캔 시작 전 Plex 유휴 상태를 확인합니다...")
-        while await check_plex_activity():
-            if SHUTDOWN_REQUESTED: break
-            logger.info("Plex가 작업을 완료할 때까지 15초 대기합니다...")
-            await asyncio.sleep(15)
 
-        if not SHUTDOWN_REQUESTED:
-            await await_sync(library.update, path=mapped_path)
-            logger.info(f"경로 스캔 요청 완료: '{mapped_path}'. Plex가 백그라운드에서 처리합니다.")
+        # --- '--scan-at-once' 옵션에 따른 분기 처리 ---
+        if CONFIG.get("SCAN_AT_ONCE"):
+            # 즉시 스캔 요청 후 종료 (Fire-and-Forget)
+            logger.info(f"즉시 스캔 요청 (--scan-at-once): '{mapped_path}'")
+            try:
+                await await_sync(library.update, path=mapped_path)
+                logger.info(f"경로 '{mapped_path}'에 대한 스캔 요청을 성공적으로 보냈습니다. 스크립트를 종료합니다.")
+            except Exception as e:
+                logger.error(f"즉시 스캔 요청 중 오류 발생: {e}")
+            return # 즉시 종료
+        else:
+            # 유휴 상태 확인 후, 스캔 완료까지 대기
+            logger.info(f"지정된 단일 경로 스캔 시작 (완료까지 대기): '{mapped_path}' (원본: '{scan_path_specific}')")
+
+            # 1. 스캔 전 유휴 상태 확인
+            logger.info("스캔 시작 전 Plex 유휴 상태를 확인합니다...")
+            while True:
+                if SHUTDOWN_REQUESTED: break
+                active_tasks = await get_plex_library_activities(library)
+                if not active_tasks:
+                    logger.debug("Plex가 유휴 상태입니다. 스캔을 진행합니다."); break
+                for task in active_tasks:
+                    progress_val = getattr(task, 'progress', 0)
+                    details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
+                    details_str = f" - {', '.join(details)}" if details else ""
+                    logger.info(f"Plex 활동 대기 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                logger.info("...Plex가 이전 작업을 완료할 때까지 15초 대기합니다...")
+                try: await asyncio.sleep(15)
+                except asyncio.CancelledError: SHUTDOWN_REQUESTED = True; break
+
+            if SHUTDOWN_REQUESTED: return
+
+            # 2. 스캔 요청
+            try:
+                await await_sync(library.update, path=mapped_path)
+                logger.info(f"경로 스캔 요청 완료: '{mapped_path}'. Plex가 백그라운드에서 처리합니다.")
+                logger.debug("스캔 요청 후 5초 대기 (Plex 활동 시작 대기)...")
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"경로 '{mapped_path}' 스캔 요청 중 오류 발생: {e}")
+                return
+
+            # 3. 스캔 완료 대기
+            logger.info(f"'{mapped_path}' 스캔이 완료될 때까지 대기합니다...")
+            while True:
+                if SHUTDOWN_REQUESTED: break
+                active_tasks = await get_plex_library_activities(library)
+                if not active_tasks: break
+                for task in active_tasks:
+                    progress_val = getattr(task, 'progress', 0)
+                    details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
+                    details_str = f" - {', '.join(details)}" if details else ""
+                    logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                try: await asyncio.sleep(15)
+                except asyncio.CancelledError: SHUTDOWN_REQUESTED = True; break
+
+            if not SHUTDOWN_REQUESTED:
+                logger.info(f"경로 '{mapped_path}' 스캔이 완료되었습니다.")
         return
 
     # --scan-full 옵션 처리 (분할 스캔)
     if CONFIG.get("SCAN_FULL"):
         logger.info(f"섹션 '{library.title}' (ID: {section_id}) 전체 분할 스캔을 시작합니다.")
-        
+
         root_paths = await await_sync(get_plex_library_paths, section_id)
         if not root_paths:
             logger.error(f"DB에서 섹션 ID {section_id}에 등록된 경로를 찾을 수 없습니다.")
@@ -1009,7 +1080,7 @@ async def run_scan_mode(args):
             if scan_depth == 0:
                 dirs_to_scan.add(root_path)
                 continue
-            
+
             for dirpath, dirnames, _ in os.walk(root_path, topdown=True):
                 relative_path = os.path.relpath(dirpath, root_path)
                 current_depth = 0 if relative_path == '.' else len(relative_path.split(os.sep))
@@ -1022,7 +1093,7 @@ async def run_scan_mode(args):
                     for dirname in dirnames:
                         dirs_to_scan.add(os.path.join(dirpath, dirname))
                     del dirnames[:]
-        
+
         if not dirs_to_scan:
             logger.warning(f"Depth {scan_depth}에서 스캔할 하위 디렉터리를 찾지 못했습니다. 루트 경로를 직접 스캔합니다.")
             dirs_to_scan.update(root_paths)
@@ -1030,7 +1101,7 @@ async def run_scan_mode(args):
         sorted_scan_list = sorted(list(dirs_to_scan), key=natural_sort_key)
         total_dirs = len(sorted_scan_list)
         logger.info(f"총 {total_dirs}개의 디렉터리를 순차적으로 스캔합니다.")
-        
+
         for i, path_to_scan in enumerate(sorted_scan_list):
             if SHUTDOWN_REQUESTED:
                 logger.warning("사용자 요청으로 스캔이 중단되었습니다.")
@@ -1038,15 +1109,41 @@ async def run_scan_mode(args):
 
             # 1. 다음 스캔 '전'에 Plex가 유휴 상태인지 확인
             logger.debug(f"[{i+1}/{total_dirs}] 다음 스캔 전 Plex 상태 확인...")
-            while await check_plex_activity():
+            while True:
                 if SHUTDOWN_REQUESTED: break
-                logger.info("Plex가 이전 작업을 완료할 때까지 15초 대기합니다...")
+
+                active_tasks = await get_plex_library_activities(library)
+                if not active_tasks:
+                    logger.debug("Plex가 유휴 상태입니다. 다음 스캔을 진행합니다.")
+                    break
+
+                # 활동이 있을 경우, 상세 내용을 로그로 남깁니다.
+                for task in active_tasks:
+                    progress_val = getattr(task, 'progress', 0)
+                    # 상세 정보를 담을 리스트
+                    details = []
+                    # subtitle 속성이 존재하고 비어있지 않으면 추가
+                    subtitle = getattr(task, 'subtitle', None)
+                    if subtitle:
+                        details.append(subtitle)
+
+                    # context 속성이 존재하고 비어있지 않으면 추가
+                    context = getattr(task, 'context', None)
+                    if context:
+                        details.append(context)
+
+                    # details 리스트에 내용이 있으면 " - " 와 함께 문자열로 만듦
+                    details_str = f" - {', '.join(details)}" if details else ""
+
+                    logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+
+                logger.info("...Plex가 이전 작업을 완료할 때까지 15초 대기합니다...")
                 try:
                     await asyncio.sleep(15)
                 except asyncio.CancelledError:
                     SHUTDOWN_REQUESTED = True
                     break
-            
+
             if SHUTDOWN_REQUESTED: break
 
             # 2. 스캔 요청 보내기
@@ -1054,28 +1151,40 @@ async def run_scan_mode(args):
             logger.info(f"[{i+1}/{total_dirs}] 경로 스캔 요청: '{mapped_path_to_scan}'")
             try:
                 await await_sync(library.update, path=mapped_path_to_scan)
-                # 요청 후 15초 대기하여 Plex가 스캔 활동을 시작할 시간을 줍니다.
-                logger.debug("스캔 요청 후 15초 대기 (Plex 활동 시작 대기)...")
-                await asyncio.sleep(15) 
+                logger.debug("스캔 요청 후 5초 대기 (Plex 활동 시작 대기)...")
+                await asyncio.sleep(5) 
             except Exception as e:
                 logger.error(f"'{mapped_path_to_scan}' 스캔 요청 중 오류 발생: {e}")
                 continue
-            
+
             # 3. 방금 보낸 스캔 요청이 '끝날 때까지' 대기
             logger.info(f"'{mapped_path_to_scan}' 스캔이 완료될 때까지 대기합니다...")
             retries = 0
-            while await check_plex_activity():
+
+            while True:
                 if SHUTDOWN_REQUESTED: break
-                logger.info("...스캔 진행 중. 15초 후 다시 확인합니다.")
+
+                active_tasks = await get_plex_library_activities(library)
+                if not active_tasks:
+                    break
+
+                for task in active_tasks:
+                    progress_val = getattr(task, 'progress', 0)
+                    subtitle_val = getattr(task, 'subtitle', '')
+                    progress_str = f" ({progress_val:.0f}%)"
+                    subtitle_str = f" - {subtitle_val}" if subtitle_val else ""
+                    logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{subtitle_str}{progress_str}")
+
                 try:
                     await asyncio.sleep(15)
                 except asyncio.CancelledError:
                     SHUTDOWN_REQUESTED = True
                     break
+
                 retries += 1
                 if retries > 120: # 30분 이상 걸리면 경고
                     logger.warning(f"경로 '{mapped_path_to_scan}' 스캔이 30분 이상 소요되고 있습니다. 계속 대기합니다...")
-            
+
             if SHUTDOWN_REQUESTED: break
 
             logger.info(f"[{i+1}/{total_dirs}] 경로 '{mapped_path_to_scan}' 스캔 요청 완료.")
@@ -2157,7 +2266,7 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
         # 0. Plex 서버 및 아이템 객체 가져오기
         if PLEX_SERVER_INSTANCE is None:
             PLEX_SERVER_INSTANCE = PlexServer(CONFIG["PLEX_URL"], CONFIG["PLEX_TOKEN"])
-        
+
         item_to_dance = await await_sync(PLEX_SERVER_INSTANCE.fetchItem, item_id)
         library = item_to_dance.section()
         item_title_log = item_to_dance.title
@@ -2177,10 +2286,13 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
         # 2. 라이브러리 업데이트 (삭제를 확정)
         logger.info(f"  2. '{library.title}' 라이브러리를 스캔하여 아이템 제거를 확정합니다...")
         await await_sync(library.update)
-        
+
         # 스캔이 끝날 때까지 대기
-        while await check_plex_activity():
-            logger.info("  ...삭제 확정 스캔 진행 중, 15초 후 다시 확인합니다.")
+        while True:
+            active_tasks = await get_plex_library_activities(library)
+            if not active_tasks: break
+            for task in active_tasks:
+                logger.info(f"  ...삭제 확정 스캔 진행 중: [{task.type}] {task.title} ({getattr(task, 'progress', 0):.0f}%)")
             await asyncio.sleep(15)
         logger.info("  ...삭제 확정 스캔 완료.")
 
@@ -2189,11 +2301,14 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
         await await_sync(library.update)
 
         # 재추가 스캔이 끝날 때까지 대기
-        while await check_plex_activity():
-            logger.info("  ...아이템 재추가 스캔 진행 중, 15초 후 다시 확인합니다.")
+        while True:
+            active_tasks = await get_plex_library_activities(library)
+            if not active_tasks: break
+            for task in active_tasks:
+                logger.info(f"  ...아이템 재추가 스캔 진행 중: [{task.type}] {task.title} ({getattr(task, 'progress', 0):.0f}%)")
             await asyncio.sleep(15)
         logger.info("  ...아이템 재추가 스캔 완료.")
-        
+
         logger.info(f"ID {item_id}: Plex Dance가 성공적으로 완료되었습니다. 이제 아이템이 새로 매칭될 것입니다.")
         return True
 
@@ -2920,6 +3035,210 @@ async def run_no_poster_mode(args):
     logger.info(f"--no-poster 모드 완료 또는 중단됨. 총 {processed_items_count}개 아이템 처리 시도됨.")
 
 
+async def move_and_remove_item(item_id: int, target_dir: str) -> bool:
+    """미디어 파일을 지정된 경로로 이동하고 Plex 라이브러리에서 아이템을 제거합니다."""
+    global PLEX_SERVER_INSTANCE
+    
+    if not os.path.isdir(target_dir):
+        logger.error(f"이동 대상 경로 '{target_dir}'가 존재하지 않거나 디렉터리가 아닙니다.")
+        return False
+
+    # 1. 이동할 파일 경로 가져오기
+    source_path = await await_sync(get_media_file_path, item_id)
+    if not source_path or not os.path.exists(source_path):
+        logger.warning(f"ID {item_id}: 원본 미디어 파일을 찾을 수 없습니다. 경로: {source_path}. 이동 및 제거를 건너뜁니다.")
+        # 파일이 없으면 라이브러리에서 아이템만 제거 시도
+        try:
+            if PLEX_SERVER_INSTANCE is None:
+                PLEX_SERVER_INSTANCE = PlexServer(CONFIG["PLEX_URL"], CONFIG["PLEX_TOKEN"])
+            item_to_delete = await await_sync(PLEX_SERVER_INSTANCE.fetchItem, item_id)
+            await await_sync(item_to_delete.delete)
+            logger.info(f"ID {item_id}: 파일은 없지만 라이브러리에서 아이템을 제거했습니다.")
+        except Exception as e:
+            logger.error(f"ID {item_id}: 파일 없는 아이템 제거 중 오류 발생: {e}")
+        return True # 파일이 없는 것도 성공으로 간주
+
+    filename = os.path.basename(source_path)
+    target_path = os.path.join(target_dir, filename)
+
+    # 2. 파일명 충돌 처리
+    if os.path.exists(target_path):
+        name, ext = os.path.splitext(filename)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_filename = f"{name}_{timestamp}{ext}"
+        target_path = os.path.join(target_dir, new_filename)
+        logger.warning(f"대상 경로에 파일이 이미 존재하여 새 이름으로 변경합니다: {new_filename}")
+
+    # 3. 파일 이동
+    try:
+        logger.info(f"ID {item_id}: 파일 이동 중... \n  - 원본: {source_path}\n  - 대상: {target_path}")
+        if not CONFIG.get("DRY_RUN"):
+            await await_sync(shutil.move, source_path, target_path)
+            logger.info(f"ID {item_id}: 파일 이동 성공.")
+        else:
+            logger.info(f"[DRY RUN] ID {item_id}: 파일 이동 시뮬레이션 완료.")
+    except Exception as e:
+        logger.error(f"ID {item_id}: 파일 이동 중 오류 발생: {e}", exc_info=True)
+        return False
+
+    # 4. Plex 라이브러리에서 아이템 제거
+    try:
+        logger.info(f"ID {item_id}: Plex 라이브러리에서 아이템 제거 중...")
+        if not CONFIG.get("DRY_RUN"):
+            if PLEX_SERVER_INSTANCE is None:
+                PLEX_SERVER_INSTANCE = PlexServer(CONFIG["PLEX_URL"], CONFIG["PLEX_TOKEN"])
+
+            item_to_delete = await await_sync(PLEX_SERVER_INSTANCE.fetchItem, item_id)
+            await await_sync(item_to_delete.delete)
+            logger.info(f"ID {item_id}: 라이브러리에서 아이템 제거 성공.")
+        else:
+            logger.info(f"[DRY RUN] ID {item_id}: 라이브러리 아이템 제거 시뮬레이션 완료.")
+        return True
+    except PlexApiNotFound:
+        logger.warning(f"ID {item_id}: 라이브러리에서 아이템을 찾을 수 없습니다 (이미 제거됨).")
+        return True
+    except Exception as e:
+        logger.error(f"ID {item_id}: 라이브러리에서 아이템 제거 중 오류 발생: {e}", exc_info=True)
+        # 파일은 이미 이동되었을 수 있으므로 여기서 False를 반환할지 고민 필요
+        # 일단 오류로 보고 False 반환
+        return False
+
+
+async def run_move_no_meta_mode(args):
+    """메타데이터 없는 아이템을 찾아 이동/제거하는 인터랙티브 모드를 실행합니다."""
+    global CONFIG, SHUTDOWN_REQUESTED
+
+    lib_id = CONFIG.get("ID")
+    move_path = CONFIG.get("MOVE_NO_META_PATH")
+
+    if not lib_id:
+        logger.error("--move-no-meta 모드에는 --section-id가 필수입니다.")
+        return
+    if not move_path:
+        logger.error("--move-no-meta 모드를 사용하려면 설정 파일에 'MOVE_NO_META_PATH'를 지정해야 합니다.")
+        return
+
+    logger.info(f"--move-no-meta 모드 시작. 대상 라이브러리 ID: {lib_id}")
+    logger.info(f"파일 이동 경로: {move_path}")
+    logger.warning("이 모드는 식별된 파일들을 영구적으로 이동하고 라이브러리에서 제거합니다. 신중하게 진행하세요.")
+
+    # 미매칭 아이템 식별 쿼리 (fix-labels와 유사)
+    query = """
+    SELECT mi.id, mi.title, mi.guid, MIN(mp.file) AS file_path
+    FROM metadata_items mi
+    LEFT JOIN media_items mpi ON mpi.metadata_item_id = mi.id
+    LEFT JOIN media_parts mp ON mp.media_item_id = mpi.id
+    WHERE mi.library_section_id = ? AND mi.metadata_type = 1
+        AND (mi.guid IS NULL OR mi.guid = '' OR mi.guid LIKE 'local://%')
+    GROUP BY mi.id
+    ORDER BY mi.title_sort ASC
+    """
+    params = (str(lib_id),)
+
+    processed_count = 0
+    match_limit = CONFIG.get("MATCH_LIMIT", 0)
+
+    while not SHUTDOWN_REQUESTED:
+        if match_limit > 0 and processed_count >= match_limit:
+            logger.info(f"--match-limit ({match_limit}개) 도달. 모드를 종료합니다.")
+            break
+
+        logger.info("\n이동 대상 아이템 목록을 새로고침합니다...")
+        candidate_rows = await await_sync(fetch_all, query, params)
+
+        if not candidate_rows:
+            logger.info("이동할 대상 아이템이 더 이상 없습니다. 모드를 종료합니다.")
+            break
+
+        print(f"\n--- 미매칭 아이템 목록 ({len(candidate_rows)}개) ---")
+        header = "{idx:<5s} | {id:<7s} | {title:<60s} | {guid}"
+        print(header)
+        print("-" * 120)
+        for i, row in enumerate(candidate_rows):
+            title_disp = row['title'][:58] + '..' if len(row['title']) > 60 else row['title']
+            guid_disp = row.get('guid', 'GUID 없음')
+            print(header.format(idx=str(i + 1), id=str(row['id']), title=title_disp, guid=guid_disp))
+        print("-" * 120)
+
+        # 사용자 입력 받기
+        user_input = ""
+        try:
+            prompt = "\n이동할 항목의 번호(들) (쉼표/하이픈 범위), 'all'(전체), 또는 'q'(모드종료): "
+            user_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt)
+            user_input = user_input.lower().strip()
+        except (EOFError, KeyboardInterrupt):
+            logger.warning("\n입력 중단. 모드를 종료합니다.")
+            break
+
+        if user_input == 'q': break
+        if not user_input: continue
+
+        selected_indices = set()
+        # ... (run_no_poster_mode 와 동일한 인덱스 파싱 로직)
+        is_input_valid = True
+        if user_input == 'all':
+            selected_indices.update(range(len(candidate_rows)))
+        else:
+            parts = user_input.split(',')
+            for part in parts:
+                part = part.strip()
+                if '-' in part:
+                    try:
+                        start, end = map(int, part.split('-'))
+                        if not (0 < start <= end <= len(candidate_rows)): raise ValueError("범위 초과")
+                        selected_indices.update(range(start - 1, end))
+                    except ValueError: is_input_valid = False; break
+                elif part.isdigit():
+                    try:
+                        num = int(part)
+                        if not (0 < num <= len(candidate_rows)): raise ValueError("번호 초과")
+                        selected_indices.add(num - 1)
+                    except ValueError: is_input_valid = False; break
+                else: is_input_valid = False; break
+
+        if not is_input_valid:
+            logger.warning("잘못된 입력입니다. 다시 시도해주세요."); continue
+
+        items_to_process = [candidate_rows[i] for i in sorted(list(selected_indices))]
+        if not items_to_process: continue
+
+        # 최종 확인
+        final_confirm = ""
+        try:
+            final_confirm_prompt = f"\n경고: 선택된 {len(items_to_process)}개 아이템을 '{move_path}'로 이동하고 라이브러리에서 영구히 제거합니다. 계속하시겠습니까? (yes/no): "
+            final_confirm = await asyncio.get_running_loop().run_in_executor(None, input, final_confirm_prompt)
+            final_confirm = final_confirm.lower().strip()
+        except (EOFError, KeyboardInterrupt): break
+
+        if final_confirm != 'yes':
+            logger.info("작업을 취소했습니다.")
+            continue
+
+        # 선택된 항목 처리
+        logger.info(f"--- 선택된 {len(items_to_process)}개 항목에 대한 이동 및 제거 작업을 시작합니다 ---")
+        for item_data in items_to_process:
+            if SHUTDOWN_REQUESTED: break
+            if match_limit > 0 and processed_count >= match_limit: break
+
+            success = await move_and_remove_item(item_data['id'], move_path)
+            if success:
+                processed_count += 1
+
+            if not SHUTDOWN_REQUESTED:
+                await asyncio.sleep(0.5) # 각 작업 후 짧은 딜레이
+
+        if user_input == 'all':
+            logger.info("'all' 옵션 처리가 완료되었습니다. 모드를 종료합니다.")
+            break
+
+        if not SHUTDOWN_REQUESTED:
+            logger.info("\n다음 선택을 위해 3초 후 목록을 새로고침합니다...")
+            try: await asyncio.sleep(3)
+            except asyncio.CancelledError: break
+
+    logger.info(f"--move-no-meta 모드 완료 또는 중단됨. 총 {processed_count}개 아이템 처리 시도됨.")
+
+
 async def main():
     global CONFIG, SHUTDOWN_REQUESTED
     parser = argparse.ArgumentParser(description="Plex 미디어 아이템 재매칭", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -2953,10 +3272,12 @@ async def main():
     rematch_group.add_argument("--timeout-put", type=int, dest='requests_timeout_put', help=f"PUT 요청 타임아웃 (초) (기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['REQUESTS_TIMEOUT_PUT']})")
     rematch_group.add_argument("--match-limit", type=int, help=f"처리할 최대 아이템 개수 (0이면 무제한, 기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['MATCH_LIMIT']})")
     rematch_group.add_argument("--match-interval", type=int, help=f"각 아이템 처리 후 대기 시간 (초) (기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['MATCH_INTERVAL']})")
+    rematch_group.add_argument("--move-no-meta", action="store_true", help="메타데이터가 없는 아이템을 지정된 경로로 이동하고 라이브러리에서 제거합니다.")
 
     scan_group = parser.add_argument_group('라이브러리 스캔 옵션')
     scan_group.add_argument("--scan-full", action="store_true", help="섹션 경로를 정해진 depth로 분할하여 순차적으로 스캔합니다.")
     scan_group.add_argument("--scan-path", type=str, metavar="PATH", help="지정된 특정 경로만 스캔합니다.")
+    scan_group.add_argument("--scan-at-once", action="store_true", help="--scan-path와 함께 사용. Plex의 현재 작업 상태를 확인하지 않고 즉시 스캔을 요청하고 종료합니다.")
     scan_group.add_argument("--scan-depth", type=int, help=f"분할 스캔 시 탐색할 하위 디렉터리 깊이 (기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['SCAN_DEPTH']})")
 
     search_exclusive_group = parser.add_argument_group('검색 전용 옵션 (정보 조회 후 종료)')
@@ -3010,7 +3331,7 @@ async def main():
 
     for arg_key_from_parser, arg_value_from_parser in vars(args).items():
         config_key_target = arg_key_from_parser.upper()
-        
+
         is_cli_option_provided = False
         if hasattr(parser, 'get_default'):
             if arg_value_from_parser != parser.get_default(arg_key_from_parser):
@@ -3108,6 +3429,9 @@ async def main():
                 return
             await run_scan_mode(args)
             return # 스캔 모드 실행 후 스크립트 종료
+
+        if CONFIG.get("MOVE_NO_META"):
+            await run_move_no_meta_mode(args)
 
         if CONFIG.get("FIX_LABELS"):
             await run_fix_labels_mode(args)
