@@ -72,6 +72,31 @@ FALLBACK_DEFAULT_CONFIG = {
     "MOVE_NO_META_PATH": None,
     "MOVE_NO_META": False,
     "SCAN_AT_ONCE": False,
+
+    "JAV_PARSING_RULES": {
+    'generic_rules': [
+        r'.*?\d*([a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
+        r'.*?\b([0-9a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
+        r'.*?\d*([a-z]+)-?(\d+)(?=[^\d]|\b) => {0}|{1}',
+        r'.*?\b([0-9a-z]*[a-z]+)-?(\d+)(?=[^\d]|\b) => {0}|{1}'
+    ],
+    'censored_special_rules': [
+        r'.*?(3dsvr)[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
+        r'.*?(?<![a-z0-9])(741[a-z]\d{3})[-_]?(g\d{2,})(?=[^\d]|\b) => {0}|{1}',
+        r'.*?(?<![a-z])(t)[-_]?(28|38)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+        r'.*?(\d{2})?(id)[-_]?([1-9]\d|\d[1-9])(\d{3})(?=[^\d]|\b) => {2}{1}|{3}',
+        r'.*?(?<![a-z])(cpz\d{2})[-_]?([a-z]\d+)(?=[^\d]|\b) => {0}|{1}',
+        r'.*?(?<![a-z])(g)[-_](area)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+        r'.*?(?<![a-z])(s)[-_](cute)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+        r'.*?(?<![a-z])(mar|mbr|mmr)[-_]([a-z]{2})[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+        r'.*?(?<![a-z])(tokyo)247[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
+        r'.*?(?<![a-z])(wvr\d)[-_]?([a-z]?\d{3,})\b => {0}|{1}',
+        r'.*?((?:[0-9]{3})?ypp)[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
+        r'.*?(\d{3})(ap|good|san|ten)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+        r'.*?(\d{2})(ap|id|ntrd|san|sora|sw|ten)[-_]?(\d{3,4})(?=[^\d]|\b) => {0}{1}|{2}'
+        ]
+    },
+
 }
 
 SITE_CODE_MAP = {
@@ -279,200 +304,102 @@ def format_numeric_for_search(num_str: str, min_digits: int = 3) -> str:
     return formatted_num + trailing_alpha
 
 
+COMPILED_PARSING_RULES = {}
+
+def compile_parsing_rules():
+    """
+    CONFIG에 있는 raw string 규칙들을 파싱하여
+    실행 가능한 {'pattern', 'label_format', 'num_format'} 딕셔너리 리스트로 컴파일합니다.
+    """
+    global COMPILED_PARSING_RULES
+    if COMPILED_PARSING_RULES: # 이미 컴파일되었으면 건너뜀
+        return
+
+    logger.debug("품번 파싱 규칙을 컴파일합니다...")
+    raw_rules = CONFIG.get("JAV_PARSING_RULES", {})
+    compiled = {'special': [], 'generic': []}
+
+    rule_parser = re.compile(r'(.*?)\s*=>\s*(.*)')
+
+    # 특수 규칙 컴파일
+    for rule_str in raw_rules.get('censored_special_rules', []):
+        match = rule_parser.match(rule_str)
+        if not match: continue
+        
+        pattern, format_body = match.groups()
+        if '|' not in format_body: continue
+        
+        label_format, num_format = format_body.split('|', 1)[:2]
+        compiled['special'].append({
+            'pattern': pattern,
+            'label_format': label_format.strip(),
+            'num_format': num_format.strip()
+        })
+
+    # 범용 규칙 컴파일
+    for rule_str in raw_rules.get('generic_rules', []):
+        match = rule_parser.match(rule_str)
+        if not match: continue
+        
+        pattern, format_body = match.groups()
+        if '|' not in format_body: continue
+
+        label_format, num_format = format_body.split('|', 1)[:2]
+        compiled['generic'].append({
+            'pattern': pattern,
+            'label_format': label_format.strip(),
+            'num_format': num_format.strip()
+        })
+
+    COMPILED_PARSING_RULES = compiled
+    logger.debug(f"규칙 컴파일 완료: 특수 규칙 {len(compiled['special'])}개, 범용 규칙 {len(compiled['generic'])}개")
+
+
+def parse_product_id_with_rules(text: str) -> Optional[str]:
+    """
+    컴파일된 규칙을 사용하여 문자열에서 품번을 추출하고 정규화합니다.
+    """
+    if not text: return None
+
+    # 규칙이 컴파일되지 않았다면 컴파일 실행
+    if not COMPILED_PARSING_RULES:
+        compile_parsing_rules()
+
+    normalized_text = text.lower()
+    padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 7)
+
+    # 특수 규칙과 범용 규칙을 순서대로 순회
+    for rule_type in ['special', 'generic']:
+        for rule in COMPILED_PARSING_RULES.get(rule_type, []):
+            try:
+                match = re.match(rule['pattern'], normalized_text)
+                if match:
+                    groups = match.groups('') # 매치 안된 그룹은 빈 문자열로
+
+                    # 포맷 문자열을 사용하여 레이블과 숫자 파트 생성
+                    label_part = rule['label_format'].format(*groups)
+                    num_part = rule['num_format'].format(*groups)
+
+                    if label_part and num_part:
+                        padded_num = pad_numeric_part(num_part, padding_len)
+                        pid = f"{label_part}-{padded_num}"
+                        logger.debug(f"규칙 '{rule['pattern']}' 매치 성공 ('{rule_type}'): '{text}' -> '{pid}'")
+                        return pid.lower()
+            except (re.error, IndexError) as e:
+                logger.error(f"규칙 처리 중 오류: {rule['pattern']} on '{text}'. 오류: {e}")
+
+    logger.debug(f"모든 품번 추출 규칙에 매치 실패: '{text}'")
+    return None
+
+
 def extract_product_id_from_filename(filename: str) -> Optional[str]:
     if not filename: return None
-    padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 7)
-    t_series_numbers_pattern = "(18|24|28|34|38)" # T-시리즈 숫자 목록
-    logger.debug(f"extract_product_id_from_filename 호출: '{filename}', 패딩: {padding_len}")
-
     base_name = os.path.splitext(filename)[0]
-    logger.debug(f"  extract_product_id_from_filename: base_name='{base_name}'")
-
-    # T-시리즈 (18, 24, 28, 34, 38) 우선 검사
-    # 패턴 1: T-<시리즈번호><숫자>, 예: t-2800404, T-38123
-    t_series_match_pattern1 = re.match(rf"^(T-{t_series_numbers_pattern})(\d{{1,7}}[A-Za-z]?)(?:[^A-Za-z0-9]|$)", base_name, re.IGNORECASE)
-    if t_series_match_pattern1:
-        series_prefix_raw = t_series_match_pattern1.group(1).upper() # 예: T-28
-        series_number = t_series_match_pattern1.group(2) # 예: 28
-        numeric_part_with_suffix = t_series_match_pattern1.group(3)
-        
-        alpha_part = f"T{series_number}" # 정규화된 레이블: T28
-        padded_numeric_with_suffix = pad_numeric_part(numeric_part_with_suffix, padding_len)
-        
-        pid = f"{alpha_part.lower()}-{padded_numeric_with_suffix.lower()}"
-        logger.debug(f"  파일명 품번 추출 성공 (T-시리즈 패턴 1: T-<series><num>): '{pid}' (원본 접두사: '{series_prefix_raw}', 원본 숫자: '{numeric_part_with_suffix}')")
-        return pid
-
-    # 패턴 2: T<시리즈번호>-<숫자>, 예: t28-404, T38-00123
-    t_series_match_pattern2 = re.match(rf"^(T{t_series_numbers_pattern})-?(\d{{1,7}}[A-Za-z]?)(?:[^A-Za-z0-9]|$)", base_name, re.IGNORECASE)
-    if t_series_match_pattern2:
-        series_prefix_raw = t_series_match_pattern2.group(1).upper() # 예: T28
-        series_number = t_series_match_pattern2.group(2) # 예: 28
-        # 하이픈은 group(1)에 포함될 수도, 아닐 수도 있으나, alpha_part는 T<num>으로 고정
-        numeric_part_with_suffix = t_series_match_pattern2.group(3)
-
-        alpha_part = f"T{series_number}" # 정규화된 레이블: T28
-        padded_numeric_with_suffix = pad_numeric_part(numeric_part_with_suffix, padding_len)
-        
-        pid = f"{alpha_part.lower()}-{padded_numeric_with_suffix.lower()}"
-        logger.debug(f"  파일명 품번 추출 성공 (T-시리즈 패턴 2: T<series>-<num>): '{pid}' (원본 접두사: '{series_prefix_raw}', 원본 숫자: '{numeric_part_with_suffix}')")
-        return pid
-
-    # 일반 패턴 (기존 로직)
-    # T-시리즈 패턴에 걸리지 않은 경우에만 실행
-    match = re.match(r"^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)-(\d{1,7}[A-Za-z]?)(?:[^A-Za-z0-9]|$)", base_name, re.IGNORECASE)
-    if match:
-        alpha_part_raw = match.group(1).upper()
-        alpha_part = alpha_part_raw
-
-        numeric_part_with_suffix = match.group(2)
-        padded_numeric_with_suffix = pad_numeric_part(numeric_part_with_suffix, padding_len)
-
-        pid = f"{alpha_part.lower()}-{padded_numeric_with_suffix.lower()}"
-        logger.debug(f"  파일명 품번 추출 성공 (일반 패턴): '{pid}' (원본 레이블: '{alpha_part_raw}', 원본 숫자+접미사: '{numeric_part_with_suffix}')")
-        return pid
-
-    logger.debug(f"  파일명 '{filename}' (base_name: '{base_name}')에서 품번 추출 실패 (모든 패턴 검사 후).")
-    return None
+    return parse_product_id_with_rules(base_name)
 
 
 def extract_product_id_from_title(title: str, original_file_pid_parts: Optional[Tuple[str, str]] = None) -> Optional[str]:
-    if not title: return None
-    normalized_title = title.upper()
-    padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 7)
-    t_series_numbers_pattern = "(18|24|28|34|38)"
-    function_call_info = f"extract_product_id_from_title(title='{title[:60]}...', original_file_pid_parts={original_file_pid_parts}, padding_len={padding_len})"
-    logger.debug(function_call_info)
-
-    # 1. 원본 파일 품번 기반 직접 검색
-    if original_file_pid_parts:
-        orig_alpha_upper, orig_num_padded_upper = original_file_pid_parts[0].upper(), original_file_pid_parts[1].upper()
-        is_orig_t_series_match = re.match(rf"^T({t_series_numbers_pattern})$", orig_alpha_upper)
-
-        if is_orig_t_series_match: # 원본이 T-시리즈인 경우
-            orig_t_series_num_val = is_orig_t_series_match.group(1)
-            orig_num_unpadded_str_no_suffix = orig_num_padded_upper.lstrip('0')
-            if not orig_num_unpadded_str_no_suffix: orig_num_unpadded_str_no_suffix = "0" # "000" 같은 경우 대비
-            orig_num_suffix_alpha = ""
-            if orig_num_padded_upper and not orig_num_padded_upper[-1].isdigit():
-                orig_num_suffix_alpha = orig_num_padded_upper[-1]
-                if orig_num_padded_upper[:-1].isdigit(): # 숫자 부분만 남김
-                    orig_num_unpadded_str_no_suffix = str(int(orig_num_padded_upper[:-1]))
-                else: # 숫자 변환 불가 시 원본 사용 (예: "000A" 에서 "A" 제거 후 "000")
-                    orig_num_unpadded_str_no_suffix = orig_num_padded_upper[:-1].lstrip('0')
-                    if not orig_num_unpadded_str_no_suffix and len(orig_num_padded_upper[:-1]) > 0 : orig_num_unpadded_str_no_suffix = "0"
-
-
-            # 패턴 1: T<시리즈번호>-<숫자> (예: T28-404)
-            pattern1_t_series = rf'\b(T{orig_t_series_num_val}-)(0*\d{{1,7}}[A-Z]?)\b'
-            match1 = re.search(pattern1_t_series, normalized_title)
-            if match1:
-                title_num_part = match1.group(2)
-                title_num_unpadded_str_no_suffix_comp = title_num_part.lstrip('0')
-                if not title_num_unpadded_str_no_suffix_comp: title_num_unpadded_str_no_suffix_comp = "0"
-                title_num_suffix_alpha_comp = ""
-                if title_num_part and not title_num_part[-1].isdigit():
-                    title_num_suffix_alpha_comp = title_num_part[-1]
-                    if title_num_part[:-1].isdigit():
-                        title_num_unpadded_str_no_suffix_comp = str(int(title_num_part[:-1]))
-                    else:
-                        title_num_unpadded_str_no_suffix_comp = title_num_part[:-1].lstrip('0')
-                        if not title_num_unpadded_str_no_suffix_comp and len(title_num_part[:-1]) > 0: title_num_unpadded_str_no_suffix_comp = "0"
-
-                if orig_num_unpadded_str_no_suffix == title_num_unpadded_str_no_suffix_comp and \
-                   orig_num_suffix_alpha == title_num_suffix_alpha_comp:
-                    extracted_pid = f"{orig_alpha_upper.lower()}-{orig_num_padded_upper.lower()}"
-                    logger.debug(f"  원본 T-시리즈 패턴 1 (T{orig_t_series_num_val}-NUM) 매치. 반환: '{extracted_pid}'")
-                    return extracted_pid
-
-            # 패턴 2: T-<시리즈번호><숫자> (예: T-28404)
-            pattern2_t_series = rf'\b(T-{orig_t_series_num_val})(0*\d{{1,7}}[A-Z]?)\b'
-            match2 = re.search(pattern2_t_series, normalized_title)
-            if match2:
-                title_num_part = match2.group(2)
-                title_num_unpadded_str_no_suffix_comp = title_num_part.lstrip('0')
-                if not title_num_unpadded_str_no_suffix_comp: title_num_unpadded_str_no_suffix_comp = "0"
-                title_num_suffix_alpha_comp = ""
-                if title_num_part and not title_num_part[-1].isdigit():
-                    title_num_suffix_alpha_comp = title_num_part[-1]
-                    if title_num_part[:-1].isdigit():
-                        title_num_unpadded_str_no_suffix_comp = str(int(title_num_part[:-1]))
-                    else:
-                        title_num_unpadded_str_no_suffix_comp = title_num_part[:-1].lstrip('0')
-                        if not title_num_unpadded_str_no_suffix_comp and len(title_num_part[:-1]) > 0: title_num_unpadded_str_no_suffix_comp = "0"
-
-                if orig_num_unpadded_str_no_suffix == title_num_unpadded_str_no_suffix_comp and \
-                   orig_num_suffix_alpha == title_num_suffix_alpha_comp:
-                    extracted_pid = f"{orig_alpha_upper.lower()}-{orig_num_padded_upper.lower()}"
-                    logger.debug(f"  원본 T-시리즈 패턴 2 (T-{orig_t_series_num_val}NUM) 매치. 반환: '{extracted_pid}'")
-                    return extracted_pid
-
-        else: # 원본이 일반 품번인 경우
-            escaped_orig_alpha = re.escape(orig_alpha_upper.strip())
-            orig_num_unpadded_int_str = orig_num_padded_upper.lstrip('0')
-            if not orig_num_unpadded_int_str: orig_num_unpadded_int_str = "0"
-
-            orig_num_suffix_alpha = ""
-            if orig_num_padded_upper and not orig_num_padded_upper[-1].isdigit():
-                orig_num_suffix_alpha = orig_num_padded_upper[-1]
-                orig_num_unpadded_int_str_no_suffix = str(int(orig_num_padded_upper[:-1])) if orig_num_padded_upper[:-1].isdigit() else orig_num_padded_upper[:-1]
-                orig_num_padded_upper_no_suffix = orig_num_padded_upper[:-1] # 비교용이 아닌 실제 패딩된 숫자부분 (접미사 제외)
-            else:
-                orig_num_unpadded_int_str_no_suffix = orig_num_unpadded_int_str
-                orig_num_padded_upper_no_suffix = orig_num_padded_upper # 비교용이 아닌 실제 패딩된 숫자부분 (접미사 없음)
-
-            num_part_regex_direct = f"(?:0*{re.escape(orig_num_unpadded_int_str_no_suffix)}|{re.escape(orig_num_padded_upper_no_suffix)}){re.escape(orig_num_suffix_alpha)}?"
-            direct_pattern_str = rf'\b(?:\[?{escaped_orig_alpha}\]?\s*[-_]?\s*{num_part_regex_direct})\b'
-
-            logger.debug(f"  원본 일반 패턴: r'{direct_pattern_str}'")
-            try:
-                if re.search(direct_pattern_str, normalized_title):
-                    extracted_pid = f"{orig_alpha_upper.lower()}-{orig_num_padded_upper.lower()}"
-                    logger.debug(f"    >> 원본 일반 패턴 매치. 반환: '{extracted_pid}'")
-                    return extracted_pid
-            except re.error as e_re: logger.error(f"  정규식 오류 (원본 일반 패턴): '{direct_pattern_str}' - {e_re}")
-
-    # 2. 일반적인 품번 패턴들
-    patterns_formatters_list = [
-        (rf'\b(T({t_series_numbers_pattern}))-(\d{{1,7}}[A-Z]?)\b',
-         lambda m: f"{m.group(1).lower()}-{pad_numeric_part(m.group(3), padding_len).lower()}",
-         "T-Series (T<series>-NUM)"),
-        (rf'\bT-({t_series_numbers_pattern})(\d{{1,7}}[A-Z]?)\b',
-         lambda m: f"t{m.group(1).lower()}-{pad_numeric_part(m.group(2), padding_len).lower()}",
-         "T-Series (T-<series>NUM)"),
-        (r'\b([A-Z0-9]+)-(\d{1,7}[A-Z]?)\b',
-         lambda m: f"{m.group(1).lower()}-{pad_numeric_part(m.group(2), padding_len).lower()}",
-         "Simplified Common PID (With Hyphen)"),
-        (r'\b([A-Z0-9]*[A-Z][A-Z0-9]*?)(\d{1,7}[A-Z]?)\b', # 레이블에 최소 하나의 알파벳 강제
-         lambda m: f"{m.group(1).lower()}-{pad_numeric_part(m.group(2), padding_len).lower()}",
-         "Simplified No-Hyphen PID (Label must contain a letter) - CAUTION")
-    ]
-
-    for pattern_str, formatter, pattern_name in patterns_formatters_list:
-        logger.debug(f"  일반 패턴 시도: {pattern_name} - r'{pattern_str}' on title: '{normalized_title}'")
-        try:
-            match_obj = re.search(pattern_str, normalized_title)
-        except re.error as e_re_general:
-            logger.error(f"  정규식 오류 (일반 패턴 {pattern_name}): '{pattern_str}' - {e_re_general}")
-            continue
-
-        if match_obj:
-            # 레이블이 순수 숫자인 경우 건너뛰는 로직 (선택적, Common PID 패턴에만 적용해봄)
-            if pattern_name == "Simplified Common PID (With Hyphen)" and match_obj.group(1).isdigit():
-                logger.debug(f"    -- 패턴 '{pattern_name}' 매치했으나 레이블({match_obj.group(1)})이 모두 숫자. 건너뜀.")
-                continue
-
-            try:
-                extracted_pid = formatter(match_obj)
-                logger.debug(f"    >> 패턴 '{pattern_name}' 매치. 추출된 품번 (패딩 적용): '{extracted_pid}'")
-                return extracted_pid
-            except Exception as e_formatter:
-                logger.error(f"    >> 패턴 '{pattern_name}' 매치, 포매터 오류: {e_formatter}", exc_info=True)
-        else:
-            logger.debug(f"    -- 패턴 '{pattern_name}' 매치 안 됨.")
-
-    logger.warning(f"  '{title[:60]}...'에서 품번 추출 실패. 호출 정보: {function_call_info}")
-    return None
+    return parse_product_id_with_rules(title)
 
 
 def normalize_pid_for_comparison(pid_alpha_hyphen_padded_num: str) -> Optional[str]:
@@ -662,21 +589,40 @@ async def get_plex_matches(item_row: sqlite3.Row) -> dict:
 
 
 async def check_plex_update(metadata_id: int, start_timestamp: int) -> bool:
-    """Plex 아이템의 메타데이터 업데이트 여부를 확인합니다."""
+    """Plex 아이템의 메타데이터 업데이트 여부 및 내용의 완전성을 확인합니다."""
     if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Shutdown requested during check_plex_update")
+
     row = await get_metadata_by_id(metadata_id)
     if not row:
-        logger.warning(f"  업데이트 확인 중 아이템 (ID={metadata_id})이 DB에서 삭제됨."); return True # 삭제된 것도 업데이트로 간주
+        logger.warning(f"  업데이트 확인 중 아이템 (ID={metadata_id})이 DB에서 삭제됨."); return True
 
-    title_for_log = row['title'] if 'title' in row.keys() and row['title'] else f"ID {metadata_id}"
-    refreshed_at_val = row['refreshed_at'] if 'refreshed_at' in row.keys() and row['refreshed_at'] is not None else 0
+    title = row.get('title') or f"ID {metadata_id}"
+    refreshed_at = row.get('refreshed_at')
+    if refreshed_at is None:
+        refreshed_at = 0
 
-    if refreshed_at_val >= start_timestamp:
-        refreshed_dt = datetime.fromtimestamp(refreshed_at_val if refreshed_at_val > 0 else time.time())
-        logger.info(f"  업데이트 확인 성공: ID={metadata_id}, Title='{title_for_log}', RefreshedAt={refreshed_dt}")
+    # 1. 타임스탬프 확인
+    is_timestamp_updated = (refreshed_at >= start_timestamp)
+
+    # 2. 제목 형식의 완전성 확인
+    is_title_complete = False
+    if title:
+        if title.strip().startswith('[') or title.strip().startswith('【'):
+            is_title_complete = True
+
+    # 최종 판단
+    if is_timestamp_updated and is_title_complete:
+        refreshed_dt = datetime.fromtimestamp(refreshed_at)
+        logger.info(f"  업데이트 확인 성공: ID={metadata_id}, Title='{title}', RefreshedAt={refreshed_dt}")
         return True
-    logger.debug(f"  업데이트 미반영: ID={metadata_id}, RefreshedAt={refreshed_at_val} < StartTS={start_timestamp}")
+
+    if is_timestamp_updated and not is_title_complete:
+        logger.debug(f"  업데이트 미완료 (내용): ID={metadata_id}, Title='{title}' (형식 불완전, 대기 계속)")
+    else:
+        logger.debug(f"  업데이트 미반영 (시간): ID={metadata_id}, RefreshedAt={refreshed_at} < StartTS={start_timestamp}")
+
     return False
+
 
 async def unmatch_plex_item(metadata_id: int) -> bool:
     """로컬 JSON 정리 및 Plex API를 통한 아이템 언매치를 수행합니다."""
@@ -804,32 +750,27 @@ async def refresh_plex_item_metadata(metadata_id: int) -> bool:
 
 
 async def rematch_plex_item(metadata_id: int, guid: str, name_for_match: str = None, year_for_match: int = None) -> bool:
-    """Plex API를 통해 아이템을 주어진 GUID로 재매칭합니다."""
+    """Plex API를 통해 아이템을 주어진 GUID로 재매칭하고, 업데이트를 확인합니다."""
     if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Shutdown requested before rematch_plex_item")
+
     current_item_info = await get_metadata_by_id(metadata_id)
     if not current_item_info:
         logger.warning(f"재매칭 시도 전 아이템 (ID={metadata_id})이 DB에서 삭제됨."); return False
 
-    current_title_log = current_item_info['title'] if 'title' in current_item_info.keys() and current_item_info['title'] else f"ID {metadata_id}"
-    current_guid_log = current_item_info['guid'] if 'guid' in current_item_info.keys() and current_item_info['guid'] else "N/A"
-
-    logger.info(f"재매칭 실행: ID={metadata_id}, Title='{current_title_log}', 현재 GUID='{current_guid_log}' -> 새 GUID: {guid}")
+    current_title_log = current_item_info.get('title') or f"ID {metadata_id}"
+    logger.info(f"재매칭 실행: ID={metadata_id}, Title='{current_title_log}' -> 새 GUID: {guid}")
     if name_for_match: logger.debug(f"  매칭 시 사용할 이름 (API 전달용): {name_for_match}")
-    if year_for_match: logger.debug(f"  매칭 시 사용할 연도 (API 전달용): {year_for_match}")
 
     if CONFIG.get("DRY_RUN"):
         logger.info(f"[DRY RUN] ID {metadata_id}: 재매칭 건너뜀 (새 GUID: {guid})"); return True
 
-    start_time_ts_for_rematch_check = int(datetime.now().timestamp()) # 재매칭 후 업데이트 확인용 타임스탬프
+    start_time_ts_for_rematch_check = int(datetime.now().timestamp())
     query_params_dict = {'guid': guid, 'X-Plex-Token': CONFIG["PLEX_TOKEN"]}
-    plex_url_base = CONFIG.get('PLEX_URL', '')
     if name_for_match: query_params_dict['name'] = name_for_match
     if year_for_match: query_params_dict['year'] = str(year_for_match)
 
-    # 최종 URL 생성
+    plex_url_base = CONFIG.get('PLEX_URL', '')
     url_to_put = f"{plex_url_base}/library/metadata/{metadata_id}/match?{urllib.parse.urlencode(query_params_dict)}"
-    log_url_for_display = f"{plex_url_base}/library/metadata/{metadata_id}/match?guid=..."
-    logger.debug(f"  API 요청 (rematch): PUT {log_url_for_display}")
 
     try:
         response_put = await await_sync(requests.put, url_to_put, headers={'Accept': 'application/json'}, timeout=CONFIG.get("REQUESTS_TIMEOUT_PUT", 60))
@@ -838,63 +779,68 @@ async def rematch_plex_item(metadata_id: int, guid: str, name_for_match: str = N
     except asyncio.CancelledError:
         logger.warning(f"  ID {metadata_id}: 재매칭 API 호출 중 명시적으로 취소됨."); raise
     except requests.exceptions.RequestException as req_err:
-        logger.error(f"  ID {metadata_id}: 재매칭 API 실패. Error: {req_err}")
-        if hasattr(req_err, 'response') and req_err.response is not None:
-            resp_content_type = req_err.response.headers.get('Content-Type', '')
-            if 'application/json' in resp_content_type:
-                try: logger.debug(f"  API 실패 응답(JSON): {req_err.response.json()}")
-                except requests.exceptions.JSONDecodeError: logger.debug(f"  API 실패 응답(Text, JSON 파싱실패): {req_err.response.text[:200]}...")
-            else: logger.debug(f"  API 실패 응답(Text): {req_err.response.text[:200]}...")
-        return False
+        logger.error(f"  ID {metadata_id}: 재매칭 API 실패. Error: {req_err}"); return False
 
-    # 업데이트 확인 루프 (재매칭 후)
+    # 1. 재매칭 후 업데이트 확인
     rematch_update_confirmed = False
     for i_check in range(CONFIG.get("CHECK_COUNT", 10)):
-        if SHUTDOWN_REQUESTED:
-            logger.warning(f"  ID {metadata_id}: 재매칭 업데이트 확인 중 종료 요청으로 중단됨."); break
-        logger.debug(f"  ID {metadata_id}: 재매칭 후 메타데이터 업데이트 확인 중... ({i_check+1}/{CONFIG.get('CHECK_COUNT',10)})")
+        if SHUTDOWN_REQUESTED: break
+        logger.debug(f"  ID {metadata_id}: 재매칭 후 메타 업데이트 확인 중... ({i_check+1}/{CONFIG.get('CHECK_COUNT',10)})")
         if await check_plex_update(metadata_id, start_time_ts_for_rematch_check):
             rematch_update_confirmed = True
             break
-        try:
-            await asyncio.wait_for(asyncio.sleep(CONFIG.get("CHECK_INTERVAL",4)), timeout=CONFIG.get("CHECK_INTERVAL",4) + 0.5)
-        except asyncio.TimeoutError: pass
-        except asyncio.CancelledError:
-            logger.warning(f"  ID {metadata_id}: 재매칭 업데이트 확인 대기 중 명시적으로 취소됨."); raise
-    
+        await asyncio.sleep(CONFIG.get("CHECK_INTERVAL", 4))
+
     if rematch_update_confirmed:
-        return True # 재매칭 후 업데이트 확인 성공
-    
-    # 재매칭 후 업데이트 확인 실패 시 새로고침 시도
-    logger.warning(f"  ID {metadata_id}: 재매칭 후 메타 업데이트 미반영. 아이템 새로고침 시도...")
-    if not await refresh_plex_item_metadata(metadata_id):
-        logger.error(f"  ID {metadata_id}: 아이템 새로고침 요청 실패.")
-        return False # 새로고침 요청 자체 실패
+        return True # 재매칭 후 바로 업데이트 확인 성공 시, 즉시 종료
 
-    # 새로고침 요청 후 다시 업데이트 확인
-    logger.info(f"  ID {metadata_id}: 새로고침 요청 후 메타데이터 업데이트 재확인 시작...")
-    start_time_ts_for_refresh_check = int(datetime.now().timestamp()) # 새로고침 후 업데이트 확인용 타임스탬프 (조금 더 최근 시간)
-    
-    # 새로고침 후에는 조금 더 짧게, 적은 횟수로 확인 (예: 최대 5번, 2초 간격)
-    refresh_check_count = CONFIG.get("CHECK_COUNT", 10) // 2 
-    refresh_check_interval = CONFIG.get("CHECK_INTERVAL", 4)
-    if refresh_check_count < 3 : refresh_check_count = 3 # 최소 3번
-    if refresh_check_interval < 2 : refresh_check_interval = 2 # 최소 2초
+    if SHUTDOWN_REQUESTED:
+        logger.warning(f"  ID {metadata_id}: 재매칭 확인 중 종료 요청으로 중단됨."); return False
 
-    for i_refresh_check in range(refresh_check_count):
-        if SHUTDOWN_REQUESTED:
-            logger.warning(f"  ID {metadata_id}: 새로고침 후 업데이트 확인 중 종료 요청으로 중단됨."); break
-        logger.debug(f"  ID {metadata_id}: 새로고침 후 메타데이터 업데이트 확인 중... ({i_refresh_check+1}/{refresh_check_count})")
-        # refreshed_at이 start_time_ts_for_refresh_check (새로고침 요청 시점) 이후인지 확인
-        if await check_plex_update(metadata_id, start_time_ts_for_refresh_check): 
-            return True # 새로고침 후 업데이트 확인 성공
-        try:
-            await asyncio.wait_for(asyncio.sleep(refresh_check_interval), timeout=refresh_check_interval + 0.5)
-        except asyncio.TimeoutError: pass
-        except asyncio.CancelledError:
-            logger.warning(f"  ID {metadata_id}: 새로고침 후 업데이트 확인 대기 중 명시적으로 취소됨."); raise
-            
-    logger.warning(f"  ID {metadata_id}: 재매칭 및 새로고침 후에도 최종 업데이트 확인 실패."); return False
+    # --- 2. 새로고침 및 확인 재시도 루프 ---
+    max_refresh_retries = 3
+    for attempt in range(max_refresh_retries):
+        if SHUTDOWN_REQUESTED: break
+
+        log_prefix = f"  ID {metadata_id}:"
+        if attempt > 0:
+            log_prefix += f" [새로고침 재시도 {attempt}/{max_refresh_retries-1}]"
+
+        logger.warning(f"{log_prefix} 재매칭 후 업데이트 미반영. 아이템 새로고침 시도...")
+        if not await refresh_plex_item_metadata(metadata_id):
+            logger.error(f"{log_prefix} 아이템 새로고침 요청 실패.")
+            # 새로고침 요청 자체가 실패하면 잠시 후 재시도
+            if attempt < max_refresh_retries - 1:
+                await asyncio.sleep(5)
+            continue # 다음 재시도로
+
+        # 새로고침 요청 후 다시 업데이트 확인
+        logger.info(f"{log_prefix} 새로고침 요청 후 메타데이터 업데이트 재확인 시작...")
+        start_time_ts_for_refresh_check = int(datetime.now().timestamp())
+
+        refresh_check_count = max(3, CONFIG.get("CHECK_COUNT", 10) // 2)
+        refresh_check_interval = max(2, CONFIG.get("CHECK_INTERVAL", 4))
+
+        is_update_confirmed_after_refresh = False
+        for i_refresh_check in range(refresh_check_count):
+            if SHUTDOWN_REQUESTED: break
+            logger.debug(f"{log_prefix} 새로고침 후 확인 중... ({i_refresh_check+1}/{refresh_check_count})")
+            if await check_plex_update(metadata_id, start_time_ts_for_refresh_check): 
+                is_update_confirmed_after_refresh = True
+                break
+            await asyncio.sleep(refresh_check_interval)
+
+        if is_update_confirmed_after_refresh:
+            return True # 새로고침 후 업데이트 확인 성공 시, 즉시 종료
+
+        # 이번 재시도에서도 확인 실패 시, 루프 마지막이 아니면 잠시 대기
+        if attempt < max_refresh_retries - 1 and not SHUTDOWN_REQUESTED:
+            logger.warning(f"{log_prefix} 새로고침 후에도 업데이트 미확인. 5초 후 재시도합니다.")
+            await asyncio.sleep(5)
+
+    # 모든 재시도가 실패한 경우
+    logger.warning(f"  ID {metadata_id}: 재매칭 및 모든 새로고침 시도 후에도 최종 업데이트 확인 실패."); 
+    return False
 
 
 def get_plex_library_paths(section_id: int) -> list[str]:
@@ -1394,150 +1340,146 @@ async def run_manual_interactive_rematch_for_item(
 
     item_id = item_data['id']
     item_title = item_data.get('title', f"ID {item_id}")
-    original_row_for_matches = item_data.get('original_row') 
+    original_row_for_matches = item_data.get('original_row')
 
-    # 원본 파일 품번 정보 (extract_product_id_from_title의 힌트용)
-    original_file_pid_raw_for_hint = item_data.get('file_pid_raw') # 예: "t28-0000572"
+    original_file_pid_raw_for_hint = item_data.get('file_pid_raw')
     original_file_pid_parts_for_hint = None
     if original_file_pid_raw_for_hint:
         parts = original_file_pid_raw_for_hint.upper().split('-', 1)
         if len(parts) == 2 and parts[0] and parts[1]:
-            original_file_pid_parts_for_hint = (parts[0], parts[1]) # 예: ('T28', '0000572')
+            original_file_pid_parts_for_hint = (parts[0], parts[1])
 
-    current_norm_file_pid = item_data.get('norm_file_pid') 
-    current_file_pid_raw = item_data.get('file_pid_raw')   
-    current_normalized_file_pid_for_comparison = item_data.get('norm_file_pid') 
-    # 예: "t280000572" (normalize_pid_for_comparison("t28-0000572")의 결과)
+    current_norm_file_pid = item_data.get('norm_file_pid')
+    current_file_pid_raw = item_data.get('file_pid_raw')
+    current_normalized_file_pid_for_comparison = item_data.get('norm_file_pid')
 
     logger.debug(f"\n>>> [{calling_mode_tag}] ID {item_id} ('{item_title}') 수동 매칭 시작...")
-    logger.debug(f"    기준 파일명 품번 (Raw): '{original_file_pid_raw_for_hint}', 기준 파일명 품번 (정규화 비교용): '{current_normalized_file_pid_for_comparison}'")
-    logger.debug(f"    extract_product_id_from_title에 전달될 힌트: {original_file_pid_parts_for_hint}")
+    
+    if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Shutdown requested")
 
-    if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Shutdown requested before get_plex_matches in manual rematch")
     matches_data = await get_plex_matches(original_row_for_matches)
     valid_candidates = [
-        c for c in matches_data.get('MediaContainer',{}).get('SearchResult',[])
-        if not any(c.get('guid','').startswith(p) for p in MATCH_CANDIDATE_EXCLUDED_GUID_PREFIXES)
+        c for c in matches_data.get('MediaContainer', {}).get('SearchResult', [])
+        if not any(c.get('guid', '').startswith(p) for p in MATCH_CANDIDATE_EXCLUDED_GUID_PREFIXES)
     ]
 
-    if not valid_candidates:
-        logger.info(f"  ID {item_id}: [{calling_mode_tag}] 매칭 후보를 찾을 수 없습니다.")
-        if not CONFIG.get("DRY_RUN"):
-            await await_sync(record_completed_task, item_id, status=f"SKIPPED_NO_CANDIDATE_{calling_mode_tag.upper()}")
-        return False, "NO_CANDIDATES_FOUND"
-
-    print(f"  ID {item_id}: 다음 매칭 후보 중에서 선택하세요 ({len(valid_candidates)}개):")
-    for i_cand, cand_obj in enumerate(valid_candidates):
-        candidate_name_from_api = cand_obj.get('name')
-
-        # 후보 제목에서 품번 추출 시, 원본 파일 품번 힌트 사용!
-        candidate_title_pid_padded_raw = extract_product_id_from_title(candidate_name_from_api, original_file_pid_parts_for_hint)
-
-        # 추출된 후보 품번을 비교용으로 정규화
-        normalized_candidate_pid_for_comparison = normalize_pid_for_comparison(candidate_title_pid_padded_raw)
-
-        # 화면 표시용 품번 (검색 형식, 예: t28-572)
-        candidate_pid_display_search_form = "추출실패"
-        if candidate_title_pid_padded_raw: 
-            parts_cand_display = candidate_title_pid_padded_raw.split('-', 1)
-            if len(parts_cand_display) == 2:
-                # 숫자 부분은 format_numeric_for_search를 통해 짧게 표시
-                cand_num_for_display = format_numeric_for_search(parts_cand_display[1], 3)
-                candidate_pid_display_search_form = f"{parts_cand_display[0].lower()}-{cand_num_for_display.lower()}"
-            else: 
-                candidate_pid_display_search_form = candidate_title_pid_padded_raw.lower()
-
-        pid_match_display_string = ""
-        # 비교는 normalize_pid_for_comparison을 거친 값으로 수행
-        if current_normalized_file_pid_for_comparison and normalized_candidate_pid_for_comparison:
-            is_actually_match = (current_normalized_file_pid_for_comparison == normalized_candidate_pid_for_comparison)
-            if is_actually_match:
-                pid_match_display_string = " [품번일치]"
-            else:
-                # 화면 표시용 원본 파일 품번 (짧은 형식)
-                original_file_pid_display_search_form = "원본N/A"
-                if original_file_pid_raw_for_hint:
-                    orig_label_disp, orig_num_disp = original_file_pid_raw_for_hint.split('-',1)
-                    orig_num_disp_formatted = format_numeric_for_search(orig_num_disp, 3)
-                    original_file_pid_display_search_form = f"{orig_label_disp.lower()}-{orig_num_disp_formatted.lower()}"
-                pid_match_display_string = f" [품번다름! 원본:{original_file_pid_display_search_form}]"
-        elif current_norm_file_pid:
-            original_file_pid_display_search_form_f = current_norm_file_pid
-            if current_file_pid_raw:
-                parts_orig_f_disp = current_file_pid_raw.split('-',1)
-                if len(parts_orig_f_disp) == 2: original_file_pid_display_search_form_f = f"{parts_orig_f_disp[0].lower()}-{format_numeric_for_search(parts_orig_f_disp[1], 3).lower()}"
-            pid_match_display_string = f" [후보품번추출실패! 원본:{original_file_pid_display_search_form_f}]"
-        elif normalized_candidate_pid_for_comparison:
-            pid_match_display_string = f" [원본품번없음. 후보:{candidate_pid_display_search_form}]"
-        else:
-            pid_match_display_string = " [양쪽품번없음/추출실패]"
-
-        print(f"    {i_cand+1}. {cand_obj.get('name','이름없음')[:50]}... "
-              f"(품번: {candidate_pid_display_search_form}{pid_match_display_string}) "
-              f"Score: {cand_obj.get('score',0)}, GUID: {cand_obj.get('guid')}")
-
     final_selected_candidate = None
-    user_choice_input_str = ''
 
-    while True: 
-        if SHUTDOWN_REQUESTED: # 전역 종료 플래그 우선 확인
-            logger.warning(f"ID {item_id}: [{calling_mode_tag}] 후보 선택 중 전역 종료 요청 감지됨 (루프 시작 시점).")
+    # --- 사용자 입력 및 후보 선택/검색 루프 시작 ---
+    while True:
+        if SHUTDOWN_REQUESTED:
             return False, "GLOBAL_QUIT_REQUESTED_BY_USER"
 
-        prompt_msg = (f"  ID {item_id} - 매칭할 후보 번호 (없으면 N 또는 Enter, 전체 작업 종료 Q): ")
+        if not valid_candidates:
+            logger.info(f"  ID {item_id}: [{calling_mode_tag}] 현재 표시할 매칭 후보가 없습니다.")
+        else:
+            print(f"\n  ID {item_id}: 다음 매칭 후보 중에서 선택하세요 ({len(valid_candidates)}개):")
+            for i_cand, cand_obj in enumerate(valid_candidates):
+                candidate_name_from_api = cand_obj.get('name', '이름없음')
+                candidate_title_pid_padded_raw = extract_product_id_from_title(candidate_name_from_api, original_file_pid_parts_for_hint)
+                normalized_candidate_pid_for_comparison = normalize_pid_for_comparison(candidate_title_pid_padded_raw)
+                
+                candidate_pid_display_search_form = "추출실패"
+                if candidate_title_pid_padded_raw:
+                    parts_cand_display = candidate_title_pid_padded_raw.split('-', 1)
+                    if len(parts_cand_display) == 2:
+                        cand_num_for_display = format_numeric_for_search(parts_cand_display[1], 3)
+                        candidate_pid_display_search_form = f"{parts_cand_display[0].lower()}-{cand_num_for_display.lower()}"
+                    else:
+                        candidate_pid_display_search_form = candidate_title_pid_padded_raw.lower()
+
+                pid_match_display_string = ""
+                if current_normalized_file_pid_for_comparison and normalized_candidate_pid_for_comparison:
+                    is_actually_match = (current_normalized_file_pid_for_comparison == normalized_candidate_pid_for_comparison)
+                    if is_actually_match:
+                        pid_match_display_string = " [품번일치]"
+                    else:
+                        original_file_pid_display_search_form = "원본N/A"
+                        if original_file_pid_raw_for_hint:
+                            orig_label_disp, orig_num_disp = original_file_pid_raw_for_hint.split('-', 1)
+                            orig_num_disp_formatted = format_numeric_for_search(orig_num_disp, 3)
+                            original_file_pid_display_search_form = f"{orig_label_disp.lower()}-{orig_num_disp_formatted.lower()}"
+                        pid_match_display_string = f" [품번다름! 원본:{original_file_pid_display_search_form}]"
+                elif current_norm_file_pid:
+                    original_file_pid_display_search_form_f = "원본N/A"
+                    if current_file_pid_raw:
+                        parts_orig_f_disp = current_file_pid_raw.split('-',1)
+                        if len(parts_orig_f_disp) == 2: original_file_pid_display_search_form_f = f"{parts_orig_f_disp[0].lower()}-{format_numeric_for_search(parts_orig_f_disp[1], 3).lower()}"
+                    pid_match_display_string = f" [후보품번추출실패! 원본:{original_file_pid_display_search_form_f}]"
+                
+                print(f"    {i_cand+1}. {candidate_name_from_api[:50]}... "
+                    f"(품번: {candidate_pid_display_search_form}{pid_match_display_string}) "
+                    f"Score: {cand_obj.get('score',0)}, GUID: {cand_obj.get('guid')}")
+
         try:
-            user_choice_input_str = (await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg)).strip()
-        except EOFError:
-            logger.warning(f"ID {item_id}: [{calling_mode_tag}] 후보 선택 중 EOF 수신. 전체 작업 종료로 간주.")
-            SHUTDOWN_REQUESTED = True
-            return False, "GLOBAL_QUIT_REQUESTED_BY_USER"
-        except Exception as e_input_cand:
-            logger.error(f"ID {item_id}: [{calling_mode_tag}] 후보 선택 중 예외 발생: {e_input_cand}. 전체 작업 종료로 간주.")
+            prompt_msg = f"  ID {item_id} - 매칭할 번호 (없으면 N, 수동 검색 S, 종료 Q): "
+            user_choice_input_str = (await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
             SHUTDOWN_REQUESTED = True
             return False, "GLOBAL_QUIT_REQUESTED_BY_USER"
 
-        if user_choice_input_str.lower() == 'q': # 'q' 또는 'Q' 입력 시
-            logger.info(f"  ID {item_id}: [{calling_mode_tag}] 사용자가 'Q'를 입력하여 전체 종료를 요청합니다.")
+        if user_choice_input_str == 'q':
             SHUTDOWN_REQUESTED = True
             return False, "GLOBAL_QUIT_REQUESTED_BY_USER"
-
-        user_choice_input_str_for_logic = user_choice_input_str.lower()
-
-        if user_choice_input_str_for_logic in ['n', '']:
-            logger.info(f"  ID {item_id}: [{calling_mode_tag}] 사용자가 후보를 선택하지 않아 매칭 안 함 (현재 항목 건너뜀).")
+        
+        elif user_choice_input_str in ['n', '']:
+            logger.info(f"  ID {item_id}: 사용자가 후보를 선택하지 않아 건너뜁니다.")
             if not CONFIG.get("DRY_RUN"):
                 await await_sync(record_completed_task, item_id, status=f"SKIPPED_USER_NO_CHOICE_{calling_mode_tag.upper()}")
             return False, "USER_SKIPPED_CHOICE"
 
-        if user_choice_input_str_for_logic.isdigit() and 0 < int(user_choice_input_str_for_logic) <= len(valid_candidates):
-            final_selected_candidate = valid_candidates[int(user_choice_input_str_for_logic) - 1]
+        elif user_choice_input_str == 's':
+            try:
+                custom_search_term = (await asyncio.get_running_loop().run_in_executor(None, input, "  사용할 검색어를 입력하세요: ")).strip()
+            except (EOFError, KeyboardInterrupt):
+                SHUTDOWN_REQUESTED = True; continue
+            
+            if not custom_search_term:
+                logger.warning("검색어가 입력되지 않았습니다. 다시 시도하세요.")
+                continue
+
+            logger.info(f"  사용자 검색어 '{custom_search_term}'로 다시 검색합니다...")
+            section = await get_section_by_id(original_row_for_matches['library_section_id'])
+            agent_to_use = section.get('agent') if section else None
+            year_to_use = original_row_for_matches.get('year')
+            
+            original_manual_config = CONFIG.get("MANUAL_SEARCH", False)
+            CONFIG["MANUAL_SEARCH"] = True
+            new_matches_data = await _get_matches_api(item_id, custom_search_term, year_to_use, agent_to_use)
+            CONFIG["MANUAL_SEARCH"] = original_manual_config
+            
+            valid_candidates = [
+                c for c in new_matches_data.get('MediaContainer', {}).get('SearchResult', [])
+                if not any(c.get('guid', '').startswith(p) for p in MATCH_CANDIDATE_EXCLUDED_GUID_PREFIXES)
+            ]
+            
+            if not valid_candidates:
+                logger.warning(f"  검색어 '{custom_search_term}'에 대한 결과를 찾을 수 없습니다.")
+            continue
+
+        elif user_choice_input_str.isdigit() and 0 < int(user_choice_input_str) <= len(valid_candidates):
+            final_selected_candidate = valid_candidates[int(user_choice_input_str) - 1]
             break
+        
+        else:
+            logger.warning("잘못된 입력입니다. 목록 내 번호, N, S, 또는 Q를 입력하세요.")
+    # --- 루프 끝 ---
 
-        logger.warning("잘못된 번호입니다. 목록 내 번호, N(또는 Enter), 또는 Q를 입력하세요.")
-
-    if not final_selected_candidate: 
-        if SHUTDOWN_REQUESTED :
-            return False, "GLOBAL_QUIT_REQUESTED_BY_USER"
-        logger.error(f"  ID {item_id}: [{calling_mode_tag}] 후보 선택 로직 오류 또는 예기치 않은 종료. 후보 없음.")
-        return False, "INTERNAL_ERROR_NO_CANDIDATE_SELECTED"
+    if not final_selected_candidate:
+        return False, "NO_CANDIDATE_SELECTED"
 
     sel_name = final_selected_candidate.get('name')
     sel_guid = final_selected_candidate.get('guid')
     sel_year = final_selected_candidate.get('year')
     logger.info(f"  ID {item_id}: [{calling_mode_tag}] 후보 '{sel_name}' ({sel_guid}) 선택됨. 재매칭 실행...")
 
-    if SHUTDOWN_REQUESTED:
-        logger.warning(f"ID {item_id}: [{calling_mode_tag}] 재매칭 실행 직전 종료 요청 수신.")
-        return False, "GLOBAL_QUIT_REQUESTED_BY_USER"
-
     rematch_ok = await rematch_plex_item(item_id, sel_guid, sel_name, sel_year)
 
     db_status_str = ""
     final_op_status_msg = ""
-
     if rematch_ok:
         db_status_str = f"COMPLETED_{calling_mode_tag.upper()}_REMATCH ({sel_guid})"
-        final_op_status_msg = sel_guid 
+        final_op_status_msg = sel_guid
     else:
         if SHUTDOWN_REQUESTED:
             final_op_status_msg = "GLOBAL_QUIT_REQUESTED_DURING_REMATCH_API"
@@ -2452,17 +2394,22 @@ async def run_fix_labels_mode(args):
                     'reason': reason_str_for_listing,
                     'original_row': current_item_row_fix
                 })
-        
+
         if SHUTDOWN_REQUESTED: break
 
         if not items_for_user_review_data_fix:
             logger.info("조건에 맞는 검토 대상 아이템이 더 이상 없습니다. 모드를 종료합니다.")
             break
-        
+
+        logger.debug("--fix-labels: 'DB Label' 기준으로 목록을 자연 정렬합니다.")
         try:
-            items_for_user_review_data_fix.sort(key=lambda item: natural_sort_key(item.get('title') or ''))
+            # 정렬 키: 1순위는 'norm_db_pid'(DB 품번), 2순위는 'norm_file_pid'(파일 품번), 3순위는 제목
+            # 품번이 없는 경우(None)를 대비하여 빈 문자열('')로 처리
+            items_for_user_review_data_fix.sort(key=lambda item: natural_sort_key(
+                item.get('norm_db_pid') or item.get('norm_file_pid') or item.get('title') or ''
+            ))
         except Exception as e_sort_fix:
-            logger.error(f"--fix-labels: 제목 기준 정렬 중 오류 발생: {e_sort_fix}. 정렬 없이 진행합니다.", exc_info=True)
+            logger.error(f"--fix-labels: 목록 정렬 중 오류 발생: {e_sort_fix}. 정렬 없이 진행합니다.", exc_info=True)
 
         print(f"\n--- 품번 불일치 또는 미매칭 아이템 목록 ({len(items_for_user_review_data_fix)}개) ---")
         header_format_fix_new = "{idx:<5s} | {id:<7s} | {guid:<25s} | {dpl:<15s} | {fpl:<15s} | {title:<30s} | {reason:<25s}"
@@ -3239,6 +3186,122 @@ async def run_move_no_meta_mode(args):
     logger.info(f"--move-no-meta 모드 완료 또는 중단됨. 총 {processed_count}개 아이템 처리 시도됨.")
 
 
+async def run_force_complete_mode(args):
+    """
+    Plex 라이브러리에서 스크립트 DB에 '미완료' 상태인 아이템 목록을 보여주고,
+    사용자 선택을 받아 '완료' 상태로 강제 처리합니다.
+    """
+    global CONFIG, SHUTDOWN_REQUESTED
+
+    lib_id = CONFIG.get("ID")
+    if not lib_id:
+        logger.error("--force-complete 모드에는 --section-id가 필수입니다.")
+        return
+
+    logger.info(f"--force-complete 모드 시작. 대상 라이브러리 ID: {lib_id}")
+    logger.info("Plex에 존재하지만 스크립트의 완료 DB에 기록되지 않은 항목을 찾습니다...")
+    logger.info("이 기능은 사용자가 Plex UI에서 직접 수정한 항목을 스크립트가 더 이상 건드리지 않도록 할 때 유용합니다.")
+
+    await await_sync(create_table_if_not_exists)
+    
+    processed_count = 0
+
+    while not SHUTDOWN_REQUESTED:
+        # 1. 대상 아이템 식별
+        query = "SELECT id, title, guid, title_sort FROM metadata_items WHERE library_section_id = ?"
+        all_items_in_lib = await await_sync(fetch_all, query, (str(lib_id),))
+        
+        items_to_review = []
+        for item in all_items_in_lib:
+            if not await await_sync(is_task_completed, item['id']):
+                items_to_review.append(item)
+        
+        if not items_to_review:
+            logger.info("모든 항목이 이미 완료 처리되었거나, 라이브러리에 아이템이 없습니다. 모드를 종료합니다.")
+            break
+            
+        try:
+            items_to_review.sort(key=lambda x: natural_sort_key(x.get('title_sort') or x.get('title') or ''))
+        except Exception as e_sort:
+            logger.warning(f"목록 정렬 중 오류 발생: {e_sort}. 정렬 없이 진행합니다.")
+
+        # 2. 인터랙티브 목록 제공
+        print(f"\n--- 미완료 아이템 목록 ({len(items_to_review)}개) ---")
+        header_format = "{idx:<5s} | {id:<7s} | {title:<60s} | {guid}"
+        print(header_format.format(idx="No.", id="ID", title="Title", guid="GUID"))
+        print("-" * 120)
+        for i, item in enumerate(items_to_review):
+            title_disp = (item.get('title') or '제목 없음')
+            title_disp = title_disp[:58] + '..' if len(title_disp) > 60 else title_disp
+            guid_disp = item.get('guid', 'GUID 없음')[:45] + '...' if len(item.get('guid', '')) > 45 else item.get('guid', 'GUID 없음')
+            print(header_format.format(idx=str(i + 1), id=str(item['id']), title=title_disp, guid=guid_disp))
+        print("-" * 120)
+
+        # 3. 사용자 입력 받기
+        user_input = ""
+        try:
+            prompt = "\n완료 처리할 항목의 번호(들) (쉼표/하이픈, all, q): "
+            user_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt)
+            user_input = user_input.lower().strip()
+        except (EOFError, KeyboardInterrupt):
+            logger.warning("\n입력 중단. 모드를 종료합니다."); break
+        
+        if user_input == 'q': break
+        if not user_input: continue
+        
+        selected_indices = set()
+        is_input_valid = True
+
+        if user_input == 'all':
+            selected_indices.update(range(len(items_to_review)))
+        else:
+            parts = user_input.split(',')
+            for part in parts:
+                part = part.strip()
+                if '-' in part:
+                    try:
+                        start, end = map(int, part.split('-'))
+                        if not (0 < start <= end <= len(items_to_review)): raise ValueError
+                        selected_indices.update(range(start - 1, end))
+                    except ValueError: is_input_valid = False; break
+                elif part.isdigit():
+                    try:
+                        num = int(part)
+                        if not (0 < num <= len(items_to_review)): raise ValueError
+                        selected_indices.add(num - 1)
+                    except ValueError: is_input_valid = False; break
+                else: is_input_valid = False; break
+        
+        if not is_input_valid:
+            logger.warning("잘못된 입력입니다. 다시 시도해주세요."); continue
+            
+        items_to_process = [items_to_review[i] for i in sorted(list(selected_indices))]
+        if not items_to_process: continue
+            
+        # 4. 선택된 아이템 처리
+        logger.info(f"--- 선택된 {len(items_to_process)}개 항목을 완료 처리합니다 ---")
+        for item_data in items_to_process:
+            if SHUTDOWN_REQUESTED: break
+            item_id = item_data['id']
+            current_guid = item_data.get('guid', 'N/A')
+            status_message = "COMPLETED_MANUAL_OVERRIDE"
+            
+            if not CONFIG.get("DRY_RUN"):
+                await await_sync(record_completed_task, item_id, status=status_message, matched_guid=current_guid)
+                logger.info(f"ID {item_id}: 완료 DB에 '{status_message}'로 기록했습니다.")
+            else:
+                logger.info(f"[DRY RUN] ID {item_id}: 완료 DB에 기록 시뮬레이션.")
+            processed_count += 1
+            
+        if user_input == 'all':
+            logger.info("'all' 옵션 처리가 완료되었습니다. 모드를 종료합니다."); break
+        
+        logger.info("\n다음 선택을 위해 목록을 새로고침합니다...")
+        await asyncio.sleep(1)
+
+    logger.info(f"--force-complete 모드 완료. 총 {processed_count}개 아이템 처리됨.")
+
+
 async def main():
     global CONFIG, SHUTDOWN_REQUESTED
     parser = argparse.ArgumentParser(description="Plex 미디어 아이템 재매칭", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -3273,6 +3336,7 @@ async def main():
     rematch_group.add_argument("--match-limit", type=int, help=f"처리할 최대 아이템 개수 (0이면 무제한, 기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['MATCH_LIMIT']})")
     rematch_group.add_argument("--match-interval", type=int, help=f"각 아이템 처리 후 대기 시간 (초) (기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['MATCH_INTERVAL']})")
     rematch_group.add_argument("--move-no-meta", action="store_true", help="메타데이터가 없는 아이템을 지정된 경로로 이동하고 라이브러리에서 제거합니다.")
+    rematch_group.add_argument("--force-complete", action="store_true", help="미완료 리스트에서 선택 항목을 '완료' 상태로 강제 처리합니다.")
 
     scan_group = parser.add_argument_group('라이브러리 스캔 옵션')
     scan_group.add_argument("--scan-full", action="store_true", help="섹션 경로를 정해진 depth로 분할하여 순차적으로 스캔합니다.")
@@ -3351,6 +3415,8 @@ async def main():
 
     CONFIG.update(merged_config)
 
+    compile_parsing_rules()
+
     # --check-id 옵션 처리 (설정 로드 후)
     if args.check_id:
         logger.info("Plex 라이브러리 섹션 정보 조회 중...")
@@ -3422,13 +3488,16 @@ async def main():
         logger.info("--------------------------------------------------")
 
     try:
-        # --- 스캔 모드 우선 처리 ---
+        if CONFIG.get("FORCE_COMPLETE"):
+            await run_force_complete_mode(args)
+            return
+
         if CONFIG.get("SCAN_FULL") or CONFIG.get("SCAN_PATH"):
             if not PLEXAPI_AVAILABLE:
                 logger.critical("plexapi 라이브러리가 없어 스캔 기능을 실행할 수 없습니다. 'pip install plexapi'로 설치해주세요.")
                 return
             await run_scan_mode(args)
-            return # 스캔 모드 실행 후 스크립트 종료
+            return
 
         if CONFIG.get("MOVE_NO_META"):
             await run_move_no_meta_mode(args)
