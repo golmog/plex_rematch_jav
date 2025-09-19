@@ -55,13 +55,45 @@ FALLBACK_DEFAULT_CONFIG = {
     "SCORE_MIN": 95,
     "REQUESTS_TIMEOUT_GET": 30,
     "REQUESTS_TIMEOUT_PUT": 60,
-    "NUMERIC_PADDING_LENGTH": 7,
+    "NUMERIC_PADDING_LENGTH": 5,
     "MATCH_LIMIT": 0,
     "MATCH_INTERVAL": 2,
 
     "SCAN_DEPTH": 2,
     "SCAN_PATH_MAPPING_ENABLED": False,
     "SCAN_PATH_MAP": "/path/on/script_host:/path/on/plex_host",
+
+    "JAV_PARSING_RULES": {
+        'generic_rules': [
+            r'.*?\d*([a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
+            r'.*?\b([0-9a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
+            r'.*?\d*([a-z]+)-?(\d+)(?=[^\d]|\b) => {0}|{1}',
+            r'.*?\b([0-9a-z]*[a-z]+)-?(\d+)(?=[^\d]|\b) => {0}|{1}'
+        ],
+        'censored_special_rules': [
+            r'.*?(3dsvr)[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
+            r'.*?(?<![a-z0-9])(741[a-z]\d{3})[-_]?(g\d{2,})(?=[^\d]|\b) => {0}|{1}',
+            r'.*?(?<![a-z])(t)[-_]?(28|38)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+            r'.*?(\d{2})?(id)[-_]?([1-9]\d|\d[1-9])(\d{3})(?=[^\d]|\b) => {2}{1}|{3}',
+            r'.*?(?<![a-z])(cpz\d{2})[-_]?([a-z]\d+)(?=[^\d]|\b) => {0}|{1}',
+            r'.*?(?<![a-z])(g)[-_](area)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+            r'.*?(?<![a-z])(s)[-_](cute)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+            r'.*?(?<![a-z])(mar|mbr|mmr)[-_]([a-z]{2})[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+            r'.*?(?<![a-z])(tokyo)247[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
+            r'.*?(?<![a-z])(wvr[1-9])[-_]?([a-z]?\d{3,})\b => {0}|{1}',
+            r'.*?((?:[0-9]{3})?ypp)[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
+            r'.*?(\d{3})(ap|good|san|ten)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
+            r'.*?(\d{2})(ap|id|ntrd|san|sora|sw|ten)[-_]?(\d{3,4})(?=[^\d]|\b) => {0}{1}|{2}'
+            ]
+    },
+
+    "SITE_CODE_MAP": {
+        "dmm": "com.plexapp.agents.sjva_agent://CD",
+        "mgs": "com.plexapp.agents.sjva_agent://CM",
+        "jav321": "com.plexapp.agents.sjva_agent://CT",
+        "javbus": "com.plexapp.agents.sjva_agent://CB",
+        "javdb": "com.plexapp.agents.sjva_agent://CJ",
+    },
 
     # 수정 금지 (스크립트 내부 또는 옵션으로 제어) - YAML에 넣지 않음
     "DRY_RUN": False,
@@ -72,40 +104,6 @@ FALLBACK_DEFAULT_CONFIG = {
     "MOVE_NO_META_PATH": None,
     "MOVE_NO_META": False,
     "SCAN_NO_WAIT": False,
-
-    "JAV_PARSING_RULES": {
-    'generic_rules': [
-        r'.*?\d*([a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
-        r'.*?\b([0-9a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
-        r'.*?\d*([a-z]+)-?(\d+)(?=[^\d]|\b) => {0}|{1}',
-        r'.*?\b([0-9a-z]*[a-z]+)-?(\d+)(?=[^\d]|\b) => {0}|{1}'
-    ],
-    'censored_special_rules': [
-        r'.*?(3dsvr)[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
-        r'.*?(?<![a-z0-9])(741[a-z]\d{3})[-_]?(g\d{2,})(?=[^\d]|\b) => {0}|{1}',
-        r'.*?(?<![a-z])(t)[-_]?(28|38)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
-        r'.*?(\d{2})?(id)[-_]?([1-9]\d|\d[1-9])(\d{3})(?=[^\d]|\b) => {2}{1}|{3}',
-        r'.*?(?<![a-z])(cpz\d{2})[-_]?([a-z]\d+)(?=[^\d]|\b) => {0}|{1}',
-        r'.*?(?<![a-z])(g)[-_](area)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
-        r'.*?(?<![a-z])(s)[-_](cute)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
-        r'.*?(?<![a-z])(mar|mbr|mmr)[-_]([a-z]{2})[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
-        r'.*?(?<![a-z])(tokyo)247[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
-        r'.*?(?<![a-z])(wvr[1-9])[-_]?([a-z]?\d{3,})\b => {0}|{1}',
-        r'.*?((?:[0-9]{3})?ypp)[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
-        r'.*?(\d{3})(ap|good|san|ten)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
-        r'.*?(\d{2})(ap|id|ntrd|san|sora|sw|ten)[-_]?(\d{3,4})(?=[^\d]|\b) => {0}{1}|{2}'
-        ]
-    },
-
-}
-
-SITE_CODE_MAP = {
-    "dmm": "com.plexapp.agents.sjva_agent://CD",
-    "mgs": "com.plexapp.agents.sjva_agent://CM",
-    "jav321": "com.plexapp.agents.sjva_agent://CT",
-    "javbus": "com.plexapp.agents.sjva_agent://CB",
-    "javdb": "com.plexapp.agents.sjva_agent://CJ",
-    # 필요한 다른 사이트 코드 추가
 }
 
 CONFIG = {}
@@ -1555,6 +1553,7 @@ async def run_interactive_search_and_rematch_mode(args):
     search_keyword_val = CONFIG.get("SEARCH")
     search_field_val = CONFIG.get("SEARCH_FIELD", "title")
     library_id_val = CONFIG.get("ID")
+    site_code_map_from_config = CONFIG.get("SITE_CODE_MAP", {})
 
     if not search_keyword_val:
         logger.error("--search 옵션에는 검색할 키워드가 필요합니다. (예: --search ABCD-123)")
@@ -1586,12 +1585,12 @@ async def run_interactive_search_and_rematch_mode(args):
         base_s_query += " AND mi.title_sort LIKE ?"
         s_params_list.append(f'%{actual_search_keyword_for_query}%')
     elif search_field_val == 'site':
-        target_site_guid_prefix = SITE_CODE_MAP.get(actual_search_keyword_for_query.lower())
+        target_site_guid_prefix = site_code_map_from_config.get(actual_search_keyword_for_query.lower())
         if target_site_guid_prefix:
             base_s_query += " AND mi.guid LIKE ?"
             s_params_list.append(f'{target_site_guid_prefix}%')
         else:
-            logger.error(f"알 수 없는 사이트 키워드: '{actual_search_keyword_for_query}'. 사용 가능: {list(SITE_CODE_MAP.keys())}")
+            logger.error(f"알 수 없는 사이트 키워드: '{actual_search_keyword_for_query}'. 사용 가능: {list(site_code_map_from_config.keys())}")
             return
 
     base_s_query += " GROUP BY mi.id"
@@ -1637,8 +1636,8 @@ async def run_interactive_search_and_rematch_mode(args):
         if item_s_guid_val and item_s_guid_val != "N/A":
             base_sjva_agent_prefix = "com.plexapp.agents.sjva_agent://"
             is_sjva_guid = False
-            
-            for site_key_map, site_guid_full_prefix_from_map in SITE_CODE_MAP.items():
+
+            for site_key_map, site_guid_full_prefix_from_map in site_code_map_from_config.items():
                 actual_site_code_in_map = site_guid_full_prefix_from_map.replace(base_sjva_agent_prefix, "")
                 guid_content_after_base_agent = item_s_guid_val.replace(base_sjva_agent_prefix, "")
 

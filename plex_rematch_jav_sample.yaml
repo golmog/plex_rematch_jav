@@ -61,8 +61,8 @@ REQUESTS_TIMEOUT_GET: 30
 REQUESTS_TIMEOUT_PUT: 60
 
 # 품번의 숫자 부분을 0으로 패딩할 때 목표 길이 (비교용이므로 조정할 필요 없음)
-# 예: 123 -> 0000123 (NUMERIC_PADDING_LENGTH: 7 인 경우)
-NUMERIC_PADDING_LENGTH: 7
+# 예: 123 -> 00123 (NUMERIC_PADDING_LENGTH: 5 인 경우)
+NUMERIC_PADDING_LENGTH: 5
 
 # --move-no-meta 옵션 사용 시, 파일을 이동할 절대 경로
 MOVE_NO_META_PATH: "/PATH/TO/MOVE/NO_META"
@@ -119,4 +119,23 @@ JAV_PARSING_RULES:
     - '.*?(\d{2})(ap|id|ntrd|san|sora|sw|ten)[-_]?(\d{3,4})(?=[^\d]|\b) => {0}{1}|{2}'
 
 # 배우 정보 DB(FF) 경로
-# ACTORS_DB_PATH: "/PATH/TO/jav_actors2.db"
+ACTORS_DB_PATH: "/PATH/TO/jav_actors2.db"
+
+# plex dance용 임시 경로
+TEMP_PATH: "/PATH/TO/TEMP_MOVE"
+
+# ===================================================================
+# JAV 사이트 코드와 Plex 에이전트 GUID 접두사 매핑
+# --search-field site 옵션 사용 시, 또는 검색 결과의 사이트 정보 표시 시 사용됩니다.
+# 사용자가 직접 새로운 사이트를 추가하거나 기존 코드를 수정할 수 있습니다.
+# ===================================================================
+SITE_CODE_MAP:
+  dmm: "com.plexapp.agents.sjva_agent://CD"
+  mgs: "com.plexapp.agents.sjva_agent://CM"
+  jav321: "com.plexapp.agents.sjva_agent://CT"
+  javbus: "com.plexapp.agents.sjva_agent://CB"
+  javdb: "com.plexapp.agents.sjva_agent://CJ"
+  # 예: 새로운 사이트 'mysite'를 추가하고 싶을 경우
+  # mysite: "com.plexapp.agents.sjva_agent://XX"
+
+
