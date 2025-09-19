@@ -117,3 +117,6 @@ JAV_PARSING_RULES:
     - '.*?(\d{3})(ap|good|san|ten)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}'
     # 레이블 앞 2자리 숫자 유지
     - '.*?(\d{2})(ap|id|ntrd|san|sora|sw|ten)[-_]?(\d{3,4})(?=[^\d]|\b) => {0}{1}|{2}'
+
+# 배우 정보 DB(FF) 경로
+# ACTORS_DB_PATH: "/PATH/TO/jav_actors2.db"

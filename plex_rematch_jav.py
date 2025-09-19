@@ -71,7 +71,7 @@ FALLBACK_DEFAULT_CONFIG = {
     "MANUAL_SEARCH": False,
     "MOVE_NO_META_PATH": None,
     "MOVE_NO_META": False,
-    "SCAN_AT_ONCE": False,
+    "SCAN_NO_WAIT": False,
 
     "JAV_PARSING_RULES": {
     'generic_rules': [
@@ -945,10 +945,10 @@ async def run_scan_mode(args):
     if scan_path_specific:
         mapped_path = map_scan_path(scan_path_specific)
 
-        # --- '--scan-at-once' 옵션에 따른 분기 처리 ---
-        if CONFIG.get("SCAN_AT_ONCE"):
+        # --- '--scan-no-wait' 옵션에 따른 분기 처리 ---
+        if CONFIG.get("SCAN_NO_WAIT"):
             # 즉시 스캔 요청 후 종료 (Fire-and-Forget)
-            logger.info(f"즉시 스캔 요청 (--scan-at-once): '{mapped_path}'")
+            logger.info(f"즉시 스캔 요청 (--scan-no-wait): '{mapped_path}'")
             try:
                 await await_sync(library.update, path=mapped_path)
                 logger.info(f"경로 '{mapped_path}'에 대한 스캔 요청을 성공적으로 보냈습니다. 스크립트를 종료합니다.")
@@ -3341,7 +3341,7 @@ async def main():
     scan_group = parser.add_argument_group('라이브러리 스캔 옵션')
     scan_group.add_argument("--scan-full", action="store_true", help="섹션 경로를 정해진 depth로 분할하여 순차적으로 스캔합니다.")
     scan_group.add_argument("--scan-path", type=str, metavar="PATH", help="지정된 특정 경로만 스캔합니다.")
-    scan_group.add_argument("--scan-at-once", action="store_true", help="--scan-path와 함께 사용. Plex의 현재 작업 상태를 확인하지 않고 즉시 스캔을 요청하고 종료합니다.")
+    scan_group.add_argument("--scan-no-wait", action="store_true", help="--scan-path와 함께 사용. Plex의 현재 작업 상태를 확인하지 않고 즉시 스캔을 요청하고 종료합니다.")
     scan_group.add_argument("--scan-depth", type=int, help=f"분할 스캔 시 탐색할 하위 디렉터리 깊이 (기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['SCAN_DEPTH']})")
 
     search_exclusive_group = parser.add_argument_group('검색 전용 옵션 (정보 조회 후 종료)')

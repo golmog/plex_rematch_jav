@@ -19,6 +19,18 @@
 
 ## 업데이트
 
+**2025-09-20**
+
+-   **신규 기능**: `--update-actors` 옵션 추가 (외부 배우 DB와 비교하여 오래된 정보 업데이트)
+-   **기능 개선**: 인터랙티브 모드(`--fix-labels`, `--search` 등)에 **메타데이터 완전 초기화(Deep Metadata Reset)** 옵션(`D`) 추가. (기존 Plex Dance 대체)
+    -   단순 DB 제거가 아닌, 파일 시스템 이동, 번들/캐시 청소, 휴지통 비우기를 포함하여 잘못된 썸네일 등 모든 잔여 데이터를 확실하게 제거.
+    -   다중 파트 파일(CD1, CD2)도 안전하게 처리.
+    -   서버의 "미디어 삭제 허용" 설정과 무관하게 동작하여 파일 삭제 위험 제거.
+-   **기능 개선**: `--force-complete` 옵션을 ID 입력 방식에서 사용자 친화적인 인터랙티브 목록 선택 방식으로 변경.
+-   **기능 개선**: 모든 인터랙티브 모드에서 작업 후 목록이 자동으로 갱신되어, 변경된 ID로 인한 오류 방지.
+-   **품번 추출 로직 강화**: YAML로 제공된 정교한 특수/범용 규칙 기반의 새로운 품번 파서(`JAV_PARSING_RULES`)를 도입하여 정확성 대폭 향상.
+-   **버그 수정**: 재매칭 후 업데이트 확인 로직, 품번 비교 로직 등 다수 버그 수정 및 안정성 강화.
+
 **2025-09-09**
 
 -   `--force-complete` 옵션 추가: DB(스크립트)에서 특정 항목을 완료된 것으로 강제 처리
@@ -40,11 +52,7 @@ Plex에 등록된 JAV 라이브러리의 메타데이터를 효율적으로 수�
 ## 요구사항
 
 -   Python 3.8 이상 (권장 3.9 이상)
--   라이브러리:
-    -   `requests`
-    -   `psutil`
-    -   `PyYAML` (YAML 설정 파일 사용 시)
-    -   `plexapi` (일부 고급 기능 및 스캔 기능 사용 시)
+-   라이브러리: `requests`, `psutil`, `PyYAML`, `plexapi`
 
 ## 설치
 
@@ -126,6 +134,18 @@ python3 plex_rematch_jav.py --section-id 2 --search "ABCD-123"
 python3 plex_rematch_jav.py --section-id 2 --move-no-meta
 ```
 
+#### 배우 정보 업데이트 (`--update-actors`)
+
+```bash
+python3 plex_rematch_jav.py --section-id 2 --update-actors
+```
+
+#### 수동 완료 처리 (`--force-complete`)
+
+```bash
+python3 plex_rematch_jav.py --section-id 2 --force-complete
+```
+
 ### 4. 라이브러리 스캔
 
 #### 분할 스캔 (`--scan-full`)
@@ -145,7 +165,7 @@ python3 plex_rematch_jav.py --section-id 2 --scan-full
 python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder"
 
 # 즉시 요청: Plex 상태와 관계없이 스캔 요청 후 바로 종료
-python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder" --scan-at-once
+python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder" --scan-no-wait
 ```
 
 ### 5. 전체 옵션 목록
@@ -159,6 +179,7 @@ python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder" -
 -   `--search <키워드>`: 키워드로 아이템을 검색하여 재매칭하는 인터랙티브 모드를 실행합니다.
 -   `--scan-full`: 라이브러리 섹션의 전체 경로를 분할 스캔합니다.
 -   `--scan-path <경로>`: 지정된 경로만 스캔합니다.
+-   `--force-complete`: 수동으로 작업한 항목을 '완료' 처리하는 모드
 
 #### 작업 대상 필터링
 -   `--include <키워드>`: 제목/정렬제목에 `<키워드>`가 포함된 아이템만 작업 대상으로 합니다. (여러 번 사용 가능)
@@ -177,13 +198,12 @@ python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder" -
 -   `--numeric-padding-length <길이>`: 품번의 숫자 부분을 0으로 채울 때 목표 길이를 지정합니다.
 
 #### 스캔 세부 설정
--   `--scan-at-once`: `--scan-path`와 함께 사용 시, Plex 상태를 확인하지 않고 즉시 스캔을 요청한 뒤 종료합니다.
 -   `--scan-depth <깊이>`: `--scan-full` 사용 시, 하위 폴더를 스캔할 기준 깊이를 지정합니다.
 
 #### 경로 및 연결 설정
--   `--plex-db <경로>`: Plex 데이터베이스 파일의 절대 경로를 지정합니다. (YAML 설정보다 우선)
--   `--plex-url <주소>`: Plex 서버의 URL을 지정합니다. (YAML 설정보다 우선)
--   `--plex-token <토큰>`: Plex 인증 토큰을 지정합니다. (YAML 설정보다 우선)
+-   `--plex-db <경로>`: Plex 데이터베이스 파일의 절대 경로를 지정합니다.
+-   `--plex-url <주소>`: Plex 서버의 URL을 지정합니다.
+-   `--plex-token <토큰>`: Plex 인증 토큰을 지정합니다.
 -   `--completion-db <경로>`: 완료된 작업 목록을 기록할 데이터베이스 파일 경로를 지정합니다.
 
 #### 성능 및 네트워크
@@ -196,6 +216,7 @@ python3 plex_rematch_jav.py --section-id 2 --scan-path "/mnt/media/new_folder" -
 #### 설정 파일 및 로깅
 -   `--config <파일경로>`: 기본 `plex_rematch_jav.yaml` 외에 다른 설정 파일을 사용합니다.
 -   `-v`, `-vv`: 로그 출력 수준을 높입니다. 일반 정보는 `-v`, 상세 디버깅 정보는 `-vv`를 사용합니다.
+-   `--workers`, `--match-limit`, `--match-interval`, `--score-min` 등 다양한 세부 옵션 제공 (자세한 내용은 `--help` 참조)
 
 ## 기여
 
