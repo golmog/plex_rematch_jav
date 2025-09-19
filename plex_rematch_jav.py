@@ -63,6 +63,15 @@ FALLBACK_DEFAULT_CONFIG = {
     "SCAN_PATH_MAPPING_ENABLED": False,
     "SCAN_PATH_MAP": "/path/on/script_host:/path/on/plex_host",
 
+    "SJVA_AGENT_GUID_PREFIX": "com.plexapp.agents.sjva_agent://",
+    "SITE_CODE_MAP": {
+        "dmm": ["CD", "YMCD"],
+        "mgs": ["CM", "YMCM"],
+        "jav321": ["CT", "YMCT"],
+        "javbus": ["CB", "YMCB"],
+        "javdb": ["CJ", "YMCJ"],
+    },
+
     "JAV_PARSING_RULES": {
         'generic_rules': [
             r'.*?\d*([a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
@@ -85,14 +94,6 @@ FALLBACK_DEFAULT_CONFIG = {
             r'.*?(\d{3})(ap|good|san|ten)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
             r'.*?(\d{2})(ap|id|ntrd|san|sora|sw|ten)[-_]?(\d{3,4})(?=[^\d]|\b) => {0}{1}|{2}'
             ]
-    },
-
-    "SITE_CODE_MAP": {
-        "dmm": "com.plexapp.agents.sjva_agent://CD",
-        "mgs": "com.plexapp.agents.sjva_agent://CM",
-        "jav321": "com.plexapp.agents.sjva_agent://CT",
-        "javbus": "com.plexapp.agents.sjva_agent://CB",
-        "javdb": "com.plexapp.agents.sjva_agent://CJ",
     },
 
     # 수정 금지 (스크립트 내부 또는 옵션으로 제어) - YAML에 넣지 않음
@@ -1585,12 +1586,17 @@ async def run_interactive_search_and_rematch_mode(args):
         base_s_query += " AND mi.title_sort LIKE ?"
         s_params_list.append(f'%{actual_search_keyword_for_query}%')
     elif search_field_val == 'site':
-        target_site_guid_prefix = site_code_map_from_config.get(actual_search_keyword_for_query.lower())
-        if target_site_guid_prefix:
-            base_s_query += " AND mi.guid LIKE ?"
-            s_params_list.append(f'{target_site_guid_prefix}%')
+        site_key = actual_search_keyword_for_query.lower()
+        target_prefixes = site_code_map_from_config.get(site_key)
+
+        if target_prefixes:
+            # 여러 OR 조건을 동적으로 생성
+            or_conditions = " OR ".join(["mi.guid LIKE ?"] * len(target_prefixes))
+            base_s_query += f" AND ({or_conditions})"
+            # 각 조건에 맞는 파라미터 추가
+            s_params_list.extend([f'{prefix}%' for prefix in target_prefixes])
         else:
-            logger.error(f"알 수 없는 사이트 키워드: '{actual_search_keyword_for_query}'. 사용 가능: {list(site_code_map_from_config.keys())}")
+            logger.error(f"알 수 없는 사이트 키워드: '{site_key}'. 사용 가능: {list(site_code_map_from_config.keys())}")
             return
 
     base_s_query += " GROUP BY mi.id"
@@ -1612,7 +1618,7 @@ async def run_interactive_search_and_rematch_mode(args):
     items_for_user_action = [] 
     print(f"\n--- 검색 결과 ({len(search_result_rows)}개) ---")
     # 헤더 형식 정의
-    header_fmt_search = "{idx:<5s} {id:<7s} | {guid_display:<20s} | {site:<8s}"
+    header_fmt_search = "{idx:<5s} {id:<7s} | {guid_display:<16s} | {site:<8s}"
     header_title_part_search = "제목 (DB)" # 너비는 유동적이므로 따로 관리
     # 여기서는 전체 너비를 대략적으로 맞추기 위해 print("-" * 110) 사용
     print(f"{header_fmt_search.format(idx='No.', id='ID', guid_display='GUID', site='SITE')} | {header_title_part_search}")
@@ -1634,20 +1640,22 @@ async def run_interactive_search_and_rematch_mode(args):
         display_guid_to_print_search = "N/A"
 
         if item_s_guid_val and item_s_guid_val != "N/A":
-            base_sjva_agent_prefix = "com.plexapp.agents.sjva_agent://"
+            base_sjva_agent_prefix = CONFIG.get("SJVA_AGENT_GUID_PREFIX")
             is_sjva_guid = False
 
-            for site_key_map, site_guid_full_prefix_from_map in site_code_map_from_config.items():
-                actual_site_code_in_map = site_guid_full_prefix_from_map.replace(base_sjva_agent_prefix, "")
-                guid_content_after_base_agent = item_s_guid_val.replace(base_sjva_agent_prefix, "")
+            for site_key, full_prefixes_list in site_code_map_from_config.items():
+                if any(item_s_guid_val.startswith(p) for p in full_prefixes_list):
+                    # 일치하는 접두사를 찾으면 사이트 정보 설정하고 루프 탈출
+                    display_site_code_search = site_key.upper()
 
-                if item_s_guid_val.startswith(base_sjva_agent_prefix) and \
-                    guid_content_after_base_agent.startswith(actual_site_code_in_map):
-                    display_site_code_search = site_key_map.upper()
-                    content_id_part = guid_content_after_base_agent.replace(actual_site_code_in_map, "", 1)
-                    display_guid_to_print_search = actual_site_code_in_map + content_id_part
+                    # 어떤 접두사와 일치했는지 찾아서 GUID 내용 생성
+                    matched_prefix = next(p for p in full_prefixes_list if item_s_guid_val.startswith(p))
+                    site_code_in_map = matched_prefix.replace(base_sjva_agent_prefix, "")
+                    content_id_part = item_s_guid_val.replace(matched_prefix, "", 1)
+                    display_guid_to_print_search = site_code_in_map + content_id_part
+
                     is_sjva_guid = True
-                    break
+                    break # 바깥쪽 for 루프 탈출
 
             if not is_sjva_guid and item_s_guid_val.startswith(base_sjva_agent_prefix):
                 is_sjva_guid = True
@@ -1679,7 +1687,7 @@ async def run_interactive_search_and_rematch_mode(args):
             display_guid_to_print_search = "No GUID"
             display_site_code_search = "N/A"
 
-        guid_for_print_final = display_guid_to_print_search[:18] + ".." if len(display_guid_to_print_search) > 20 else display_guid_to_print_search
+        guid_for_print_final = display_guid_to_print_search[:14] + ".." if len(display_guid_to_print_search) > 16 else display_guid_to_print_search
         site_for_print_final = display_site_code_search[:6] + ".." if len(display_site_code_search) > 8 else display_site_code_search
 
         items_for_user_action.append({
@@ -2271,7 +2279,7 @@ async def run_fix_labels_mode(args):
     logger.info("다음 조건 중 하나 이상에 해당하는 아이템을 검토합니다:\n"
                 "  1. GUID가 없거나, 'local://', 'com.plexapp.agents.none://' 등으로 시작하여 매칭이 완료되지 않은 아이템.\n"
                 "  2. 제목 형식이 비정상적이어서 메타데이터가 완전히 적용되지 않은 것으로 추정되는 아이템 (예: '품번 / 정보 / 사이트코드' 형태).\n"
-                "  3. GUID가 SJVA 에이전트(com.plexapp.agents.sjva_agent://)가 아닌 다른 에이전트로 매칭된 경우.\n"
+                f"  3. GUID가 SJVA 에이전트({CONFIG.get("SJVA_AGENT_GUID_PREFIX")})가 아닌 다른 에이전트로 매칭된 경우.\n"
                 "  4. SJVA 에이전트로 매칭되었으나, 파일명 품번과 DB 제목(또는 정렬제목)에서 추출된 품번이 불일치하는 경우.\n"
                 "  5. SJVA 에이전트로 매칭되었고 파일명 품번은 있으나, DB 제목에서 품번 추출이 안 되는 경우.")
 
@@ -2312,7 +2320,7 @@ async def run_fix_labels_mode(args):
     current_match_limit = CONFIG.get("MATCH_LIMIT", 0)
     processed_items_in_fix_mode = 0
     
-    sjva_agent_guid_prefix_val = "com.plexapp.agents.sjva_agent://"
+    sjva_agent_guid_prefix_val = CONFIG.get("SJVA_AGENT_GUID_PREFIX")
     none_agent_guid_prefix_val = "com.plexapp.agents.none://"
     known_site_codes_for_incomplete_check = ["dmm", "mgs", "javbus", "javdb", "jav321", "1pondo", "heyzo", "caribbean", "10musume", "pacopacomama", "aventertainments", "fc2", "tokyo-hot"]
 
@@ -2411,7 +2419,7 @@ async def run_fix_labels_mode(args):
             logger.error(f"--fix-labels: 목록 정렬 중 오류 발생: {e_sort_fix}. 정렬 없이 진행합니다.", exc_info=True)
 
         print(f"\n--- 품번 불일치 또는 미매칭 아이템 목록 ({len(items_for_user_review_data_fix)}개) ---")
-        header_format_fix_new = "{idx:<5s} | {id:<7s} | {guid:<25s} | {dpl:<15s} | {fpl:<15s} | {title:<30s} | {reason:<25s}"
+        header_format_fix_new = "{idx:<5s} | {id:<7s} | {guid:<18s} | {dpl:<15s} | {fpl:<15s} | {title:<35s} | {reason:<25s}"
         print(header_format_fix_new.format(idx="No.", id="ID", guid="GUID", dpl="DB Label", fpl="File Label", title="Title", reason="Reason"))
         line_len_new = len(header_format_fix_new.format(idx="",id="",guid="",dpl="",fpl="",title="",reason="")) - 20
         print("-" * line_len_new)
@@ -2421,17 +2429,17 @@ async def run_fix_labels_mode(args):
             if guid_to_display.startswith(sjva_agent_guid_prefix_val): guid_to_display = guid_to_display.replace(sjva_agent_guid_prefix_val, "sjva:")
             elif guid_to_display.startswith(none_agent_guid_prefix_val): guid_to_display = guid_to_display.replace(none_agent_guid_prefix_val, "none:")
             if '?' in guid_to_display: guid_to_display = guid_to_display.split('?', 1)[0]
-            
+
             title_val = item_info_p.get('title', '')
             reason_val = item_info_p.get('reason', '')
 
             print(header_format_fix_new.format(
                 idx=str(idx + 1),
                 id=str(item_info_p['id']),
-                guid=guid_to_display[:23] + ".." if len(guid_to_display) > 25 else guid_to_display,
+                guid=guid_to_display[:16] + ".." if len(guid_to_display) > 18 else guid_to_display,
                 dpl=(item_info_p.get('norm_db_pid') or 'N/A')[:13],
                 fpl=(item_info_p.get('norm_file_pid') or 'N/A')[:13],
-                title=(title_val[:28] + "..") if len(title_val) > 30 else title_val,
+                title=(title_val[:33] + "..") if len(title_val) > 35 else title_val,
                 reason=(reason_val[:23] + "..") if len(reason_val) > 25 else reason_val
             ))
         print("-" * line_len_new)
@@ -2835,7 +2843,7 @@ async def run_no_poster_mode(args):
 
             file_path = row.get('file_path')
             file_pid_raw = extract_product_id_from_filename(os.path.basename(file_path)) if file_path else None
-            
+
             items_for_user_review.append({
                 'id': row['id'],
                 'title': row.get('title', "제목 없음"),
@@ -2845,9 +2853,9 @@ async def run_no_poster_mode(args):
                 'norm_file_pid': normalize_pid_for_comparison(file_pid_raw),
                 'original_row': row
             })
-        
+
         print(f"\n--- 포스터 문제 아이템 목록 ({len(items_for_user_review)}개) ---")
-        header_format = "{idx:<5s} | {id:<7s} | {reason:<18s} | {title:<50s} | {guid}"
+        header_format = "{idx:<5s} | {id:<7s} | {reason:<18s} | {title:<45s} | {guid:<30s}"
         print(header_format.format(idx="No.", id="ID", reason="문제 사유", title="제목", guid="GUID"))
         print("-" * 130)
 
@@ -2855,7 +2863,7 @@ async def run_no_poster_mode(args):
             title_disp = item['title'][:48] + '..' if len(item['title']) > 50 else item['title']
             guid_disp = item['guid'][:40] + '..' if len(item['guid']) > 40 else item['guid']
             print(header_format.format(idx=str(idx + 1), id=str(item['id']), reason=item['reason'], title=title_disp, guid=guid_disp))
-        
+
         print("-" * 130)
 
         # --- 3. 사용자 입력 받기 (아이템 선택) ---
@@ -2867,7 +2875,7 @@ async def run_no_poster_mode(args):
         except (EOFError, KeyboardInterrupt):
             logger.warning("\n입력 중단. 모드를 종료합니다.")
             break
-        
+
         if user_input == 'q': break
         if not user_input: continue
 
@@ -2898,9 +2906,9 @@ async def run_no_poster_mode(args):
                 else:
                     logger.warning(f"잘못된 입력 형식: '{part}'.")
                     is_input_valid = False; break
-        
+
         if not is_input_valid: continue
-        
+
         items_to_process = [items_for_user_review[i] for i in sorted(list(selected_indices))]
         if not items_to_process: continue
 
@@ -2926,13 +2934,13 @@ async def run_no_poster_mode(args):
             except (EOFError, KeyboardInterrupt):
                 user_has_quit_this_cycle = True
                 break
-        
+
         if SHUTDOWN_REQUESTED or user_has_quit_this_cycle: break
         if match_mode_choice == 'c': continue
 
         # --- 5. 선택된 항목 처리 ---
         logger.info(f"--- 선택된 {len(items_to_process)}개 항목에 대해 '{match_mode_choice.upper()}' 모드로 처리를 시작합니다 ---")
-        
+
         for item_data in items_to_process:
             if SHUTDOWN_REQUESTED or user_has_quit_this_cycle: break
             if match_limit > 0 and processed_items_count >= match_limit: break
@@ -3209,16 +3217,16 @@ async def run_force_complete_mode(args):
         # 1. 대상 아이템 식별
         query = "SELECT id, title, guid, title_sort FROM metadata_items WHERE library_section_id = ?"
         all_items_in_lib = await await_sync(fetch_all, query, (str(lib_id),))
-        
+
         items_to_review = []
         for item in all_items_in_lib:
             if not await await_sync(is_task_completed, item['id']):
                 items_to_review.append(item)
-        
+
         if not items_to_review:
             logger.info("모든 항목이 이미 완료 처리되었거나, 라이브러리에 아이템이 없습니다. 모드를 종료합니다.")
             break
-            
+
         try:
             items_to_review.sort(key=lambda x: natural_sort_key(x.get('title_sort') or x.get('title') or ''))
         except Exception as e_sort:
@@ -3226,13 +3234,16 @@ async def run_force_complete_mode(args):
 
         # 2. 인터랙티브 목록 제공
         print(f"\n--- 미완료 아이템 목록 ({len(items_to_review)}개) ---")
-        header_format = "{idx:<5s} | {id:<7s} | {title:<60s} | {guid}"
+        header_format = "{idx:<5s} | {id:<7s} | {title:<50s} | {guid:<30s}"
         print(header_format.format(idx="No.", id="ID", title="Title", guid="GUID"))
         print("-" * 120)
         for i, item in enumerate(items_to_review):
             title_disp = (item.get('title') or '제목 없음')
             title_disp = title_disp[:58] + '..' if len(title_disp) > 60 else title_disp
-            guid_disp = item.get('guid', 'GUID 없음')[:45] + '...' if len(item.get('guid', '')) > 45 else item.get('guid', 'GUID 없음')
+            guid_disp = item.get('guid', 'GUID 없음')
+            if '?' in guid_disp:
+                guid_disp = guid_disp.split('?', 1)[0]
+            guid_disp = guid_disp[:28] + '...' if len(guid_disp) > 30 else guid_disp
             print(header_format.format(idx=str(i + 1), id=str(item['id']), title=title_disp, guid=guid_disp))
         print("-" * 120)
 
@@ -3244,10 +3255,10 @@ async def run_force_complete_mode(args):
             user_input = user_input.lower().strip()
         except (EOFError, KeyboardInterrupt):
             logger.warning("\n입력 중단. 모드를 종료합니다."); break
-        
+
         if user_input == 'q': break
         if not user_input: continue
-        
+
         selected_indices = set()
         is_input_valid = True
 
@@ -3270,13 +3281,13 @@ async def run_force_complete_mode(args):
                         selected_indices.add(num - 1)
                     except ValueError: is_input_valid = False; break
                 else: is_input_valid = False; break
-        
+
         if not is_input_valid:
             logger.warning("잘못된 입력입니다. 다시 시도해주세요."); continue
-            
+
         items_to_process = [items_to_review[i] for i in sorted(list(selected_indices))]
         if not items_to_process: continue
-            
+
         # 4. 선택된 아이템 처리
         logger.info(f"--- 선택된 {len(items_to_process)}개 항목을 완료 처리합니다 ---")
         for item_data in items_to_process:
@@ -3284,21 +3295,282 @@ async def run_force_complete_mode(args):
             item_id = item_data['id']
             current_guid = item_data.get('guid', 'N/A')
             status_message = "COMPLETED_MANUAL_OVERRIDE"
-            
+
             if not CONFIG.get("DRY_RUN"):
                 await await_sync(record_completed_task, item_id, status=status_message, matched_guid=current_guid)
                 logger.info(f"ID {item_id}: 완료 DB에 '{status_message}'로 기록했습니다.")
             else:
                 logger.info(f"[DRY RUN] ID {item_id}: 완료 DB에 기록 시뮬레이션.")
             processed_count += 1
-            
+
         if user_input == 'all':
             logger.info("'all' 옵션 처리가 완료되었습니다. 모드를 종료합니다."); break
-        
+
         logger.info("\n다음 선택을 위해 목록을 새로고침합니다...")
         await asyncio.sleep(1)
 
     logger.info(f"--force-complete 모드 완료. 총 {processed_count}개 아이템 처리됨.")
+
+
+async def run_find_dupes_mode(args):
+    """라이브러리 내에서 중복된 품번을 가진 아이템을 찾아 사용자 조치를 받는 모드입니다."""
+    global CONFIG, SHUTDOWN_REQUESTED, PLEX_SERVER_INSTANCE
+
+    lib_id = CONFIG.get("ID")
+    if not lib_id:
+        logger.error("--find-dupes 모드에는 --section-id가 필수입니다.")
+        return
+
+    logger.info(f"--find-dupes 모드 시작. 대상 라이브러리 ID: {lib_id}")
+
+    # 이 모드에서 처리된 아이템 수를 추적
+    processed_items_count = 0
+    match_limit = CONFIG.get("MATCH_LIMIT", 0)
+    original_manual_search_config = CONFIG.get("MANUAL_SEARCH", False)
+
+    # 루프를 추가하여 작업 후 목록을 새로고침하고 다시 선택할 수 있도록 함
+    while not SHUTDOWN_REQUESTED:
+        if match_limit > 0 and processed_items_count >= match_limit:
+            logger.info(f"--match-limit ({match_limit}개) 도달. 모드를 종료합니다.")
+            break
+
+        logger.info("\n중복 아이템 목록을 새로고침합니다...")
+
+        # 1. DB에서 모든 아이템 정보 가져오기
+        query = """
+        SELECT 
+            mi.id, mi.title, mi.guid, mi.title_sort, MIN(mp.file) AS file_path
+        FROM metadata_items mi
+        LEFT JOIN media_items mpi ON mpi.metadata_item_id = mi.id
+        LEFT JOIN media_parts mp ON mp.media_item_id = mpi.id
+        WHERE mi.library_section_id = ? AND mi.metadata_type = 1
+        GROUP BY mi.id
+        """
+        all_items_in_lib = await await_sync(fetch_all, query, (str(lib_id),))
+
+        if not all_items_in_lib:
+            logger.info("라이브러리에 분석할 아이템이 없습니다."); break
+
+        # 2. 품번 기준으로 아이템 그룹화
+        items_by_pid = {}
+        for item in all_items_in_lib:
+            file_path = item.get('file_path')
+            if not file_path: continue
+
+            base_filename = os.path.basename(file_path)
+            padded_pid = extract_product_id_from_filename(base_filename)
+            normalized_pid = normalize_pid_for_comparison(padded_pid)
+
+            if normalized_pid:
+                if normalized_pid not in items_by_pid: items_by_pid[normalized_pid] = []
+                items_by_pid[normalized_pid].append({
+                    'id': item['id'],
+                    'title': item['title'],
+                    'guid': item['guid'],
+                    'file_path': file_path,
+                    'file_pid_raw': padded_pid,
+                    'norm_file_pid': normalized_pid,
+                    'original_row': item
+                })
+
+        # 3. 중복된 품번만 필터링 및 정렬
+        duplicated_pids = {pid: items for pid, items in items_by_pid.items() if len(items) > 1}
+
+        if not duplicated_pids:
+            logger.info("분석 완료. 더 이상 중복된 품번이 없습니다. 모드를 종료합니다."); break
+
+        sorted_dup_groups = sorted(duplicated_pids.values(), key=lambda items: natural_sort_key(items[0]['norm_file_pid']))
+
+        # 4. 결과 출력
+        print(f"\n--- 중복 품번 아이템 목록 ({len(sorted_dup_groups)} 그룹) ---")
+        group_list_for_selection = []
+
+        # 설정에서 SITE_CODE_MAP 가져오기
+        site_code_map_from_config = CONFIG.get("SITE_CODE_MAP", {})
+        base_sjva_agent_prefix = CONFIG.get("SJVA_AGENT_GUID_PREFIX")
+
+        for i, group in enumerate(sorted_dup_groups):
+            pid = group[0]['norm_file_pid']
+            print(f"\n{i+1}. [품번: {pid}] - {len(group)}개 중복")
+            group_list_for_selection.append(group)
+
+            for item_info in group:
+                item_guid = item_info.get('guid', '')
+                display_guid = "No GUID"
+                display_site = "N/A"
+
+                if item_guid:
+                    is_sjva_guid = False
+                    site_code_map_from_config = CONFIG.get("SITE_CODE_MAP", {})
+                    for site_key, full_prefixes_list in site_code_map_from_config.items():
+                        if any(item_guid.startswith(p) for p in full_prefixes_list):
+                            display_site = site_key.upper()
+
+                            # 실제 일치한 접두사 찾기
+                            matched_prefix = next(p for p in full_prefixes_list if item_guid.startswith(p))
+                            display_guid = item_guid.replace(matched_prefix, "", 1)
+
+                            is_sjva_guid = True
+                            break # for-loop 탈출
+
+                    if not is_sjva_guid and item_guid.startswith(base_sjva_agent_prefix):
+                        display_site = "SJVA_ETC"
+                        display_guid = item_guid.replace(base_sjva_agent_prefix, "", 1)
+                    elif not is_sjva_guid:
+                        if item_guid.startswith('local://'):
+                            display_site = "LOCAL"
+                            display_guid = item_guid
+                        elif 'plex://' in item_guid:
+                            display_site = "PLEX"
+                            display_guid = item_guid.split('/')[-1]
+                        else:
+                            display_site = "OTHER"
+                            display_guid = item_guid
+
+                if '?' in display_guid:
+                    display_guid = display_guid.split('?', 1)[0]
+
+                # 보기 좋게 자르기
+                guid_for_print = display_guid[:23] + '..' if len(display_guid) > 25 else display_guid
+                title_disp = item_info['title'][:55] + '..' if len(item_info['title']) > 57 else item_info['title']
+                print(f"   - ID: {item_info['id']:<7} | Site: {display_site:<7} | GUID: {guid_for_print:<25} | Title: {title_disp}")
+
+        # 5. 사용자 입력 받기 (그룹 선택)
+        user_input_str = ""
+        try:
+            prompt = "\n처리할 그룹의 번호(들) (쉼표/하이픈, all, q): "
+            user_input_str = await asyncio.get_running_loop().run_in_executor(None, input, prompt)
+            user_input_str = user_input_str.lower().strip()
+        except (EOFError, KeyboardInterrupt):
+            logger.warning("\n입력 중단. 모드를 종료합니다."); break
+
+        if user_input_str == 'q': break
+        if not user_input_str: continue
+
+        selected_indices = set()
+        is_input_valid = True
+        if user_input_str == 'all':
+            selected_indices.update(range(len(group_list_for_selection)))
+        else:
+            parts = user_input_str.split(',')
+            for part in parts:
+                part = part.strip()
+                if '-' in part:
+                    try:
+                        start, end = map(int, part.split('-'))
+                        if not (0 < start <= end <= len(group_list_for_selection)): raise ValueError("범위 초과")
+                        selected_indices.update(range(start - 1, end))
+                    except ValueError: is_input_valid = False; break
+                elif part.isdigit():
+                    try:
+                        num = int(part)
+                        if not (0 < num <= len(group_list_for_selection)): raise ValueError("번호 초과")
+                        selected_indices.add(num - 1)
+                    except ValueError: is_input_valid = False; break
+                else: is_input_valid = False; break
+
+        if not is_input_valid:
+            logger.warning("잘못된 입력입니다. 다시 시도해주세요."); continue
+
+        groups_to_process = [group_list_for_selection[i] for i in sorted(list(selected_indices))]
+        if not groups_to_process: continue
+
+        # 6. 사용자 입력 받기 (처리 방식 선택)
+        action_choice = ''
+        user_quit_action_select = False
+        while not action_choice:
+            if SHUTDOWN_REQUESTED: break
+            try:
+                prompt_msg = (
+                    f"\n선택된 {len(groups_to_process)}개 그룹에 대해 어떤 작업을 하시겠습니까?\n"
+                    f"  (M) 수동 병합/재매칭 (각 그룹을 하나씩 처리)\n"
+                    f"  (D) Plex Dance (그룹 내 모든 아이템에 대해 실행)\n"
+                    f"  (C) 취소 (그룹 선택으로 돌아가기)\n"
+                    f"입력 (M/D/C): "
+                )
+                action_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg)
+                action_choice = action_input.lower().strip()
+                if action_choice not in ['m', 'd', 'c']:
+                    logger.warning("잘못된 입력입니다."); action_choice = ''
+            except (EOFError, KeyboardInterrupt):
+                user_quit_action_select = True; break
+
+        if SHUTDOWN_REQUESTED or user_quit_action_select: break
+        if action_choice == 'c': continue
+
+        # 7. 선택된 작업 수행
+        for group in groups_to_process:
+            if SHUTDOWN_REQUESTED or user_quit_action_select: break
+            if match_limit > 0 and processed_items_count >= match_limit: break
+
+            pid = group[0]['norm_file_pid']
+            logger.info(f"\n>>> 그룹 '{pid}' 처리 시작... ({len(group)}개 아이템)")
+
+            if action_choice == 'd':
+                for item_data in group:
+                    if SHUTDOWN_REQUESTED: break
+                    success = await run_plex_dance_for_item(item_data['id'])
+                    if success: processed_items_count += 1
+                    await asyncio.sleep(CONFIG.get("MATCH_INTERVAL", 1))
+
+            elif action_choice == 'm': # 수동 병합
+                print(f"  그룹 '{pid}' 내 아이템들입니다. 하나를 기준으로 삼거나 모두 재매칭할 수 있습니다.")
+                for i, item_data in enumerate(group):
+                    item_guid_disp = item_data.get('guid', 'No GUID')
+                    base_sjva_agent_prefix = CONFIG.get("SJVA_AGENT_GUID_PREFIX")
+
+                    if base_sjva_agent_prefix and item_guid_disp.startswith(base_sjva_agent_prefix):
+                        item_guid_disp = item_guid_disp.replace(base_sjva_agent_prefix, "", 1)
+
+                    if '?' in item_guid_disp:
+                        display_guid = item_guid_disp.split('?', 1)[0]
+
+                    item_guid_disp = item_guid_disp[:28] + '..' if len(item_guid_disp) > 30 else item_guid_disp
+                    print(f"    {i+1}. ID: {item_data['id']:<7} | GUID: {item_guid_disp:<30} | File: {os.path.basename(item_data['file_path'])}")
+
+                item_to_rematch = None
+                while True:
+                    if SHUTDOWN_REQUESTED: break
+                    try:
+                        choice_prompt = "  재매칭할 아이템 번호를 선택하세요 (모두 재매칭: all, 이 그룹 건너뛰기: s): "
+                        item_choice_str = await asyncio.get_running_loop().run_in_executor(None, input, choice_prompt)
+                        item_choice_str = item_choice_str.strip().lower()
+
+                        if item_choice_str == 's':
+                            item_to_rematch = None; break
+                        elif item_choice_str == 'all':
+                            item_to_rematch = group; break # 리스트 전체를 전달
+                        elif item_choice_str.isdigit() and 0 < int(item_choice_str) <= len(group):
+                            item_to_rematch = [group[int(item_choice_str) - 1]]; break # 리스트 형태로 전달
+                        else:
+                            logger.warning("  잘못된 입력입니다.")
+                    except (EOFError, KeyboardInterrupt):
+                        user_quit_action_select = True; break
+
+                if SHUTDOWN_REQUESTED or user_quit_action_select: break
+                if not item_to_rematch:
+                    logger.info(f"  그룹 '{pid}'를 건너뜁니다."); continue
+
+                # 선택된 아이템(들)에 대해 수동 재매칭 실행
+                CONFIG["MANUAL_SEARCH"] = True
+                try:
+                    for item_data in item_to_rematch:
+                        if SHUTDOWN_REQUESTED: break
+                        unmatch_ok = await unmatch_plex_item(item_data['id'])
+                        if unmatch_ok:
+                            success, status_msg = await run_manual_interactive_rematch_for_item(item_data, "FIND_DUPES_MANUAL")
+                            if status_msg == "GLOBAL_QUIT_REQUESTED_BY_USER": user_quit_action_select = True
+                            if success: processed_items_count += 1
+                        else:
+                            logger.error(f"  ID {item_data['id']}: 수동 매칭 전 언매치 실패.")
+                        await asyncio.sleep(CONFIG.get("MATCH_INTERVAL", 1))
+                finally:
+                    CONFIG["MANUAL_SEARCH"] = original_manual_search_config
+
+        if user_input_str == 'all':
+            logger.info("'all' 옵션에 대한 처리가 완료되었습니다. --find-dupes 모드를 종료합니다."); break
+
+    logger.info(f"--find-dupes 모드 완료. 총 {processed_items_count}개 아이템 처리 시도됨.")
 
 
 async def main():
@@ -3306,6 +3578,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Plex 미디어 아이템 재매칭", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     info_group = parser.add_argument_group('정보 조회 옵션')
     info_group.add_argument("--check-id", "--list-sections", action="store_true", help="Plex DB의 모든 라이브러리 섹션 정보를 출력하고 종료합니다.")
+    info_group.add_argument("--find-dupes", action="store_true", help="지정된 섹션 내에서 중복된 품번을 가진 아이템들을 찾아 목록으로 보여줍니다.")
     info_group.add_argument("-v", "--verbose", action="count", default=0, help="상세 로깅 수준을 높입니다 (-v: INFO, -vv: DEBUG).")
 
     rematch_group = parser.add_argument_group('재매칭 및 필터링 옵션')
@@ -3414,6 +3687,22 @@ async def main():
 
     CONFIG.update(merged_config)
 
+    try:
+        guid_prefix = CONFIG.get("SJVA_AGENT_GUID_PREFIX", "com.plexapp.agents.sjva_agent://")
+        simple_site_map = CONFIG.get("SITE_CODE_MAP", {})
+
+        full_site_code_map = {
+            key: [guid_prefix + code for code in codes]
+            for key, codes in simple_site_map.items()
+        }
+
+        CONFIG["SITE_CODE_MAP"] = full_site_code_map
+        logger.debug("SITE_CODE_MAP이 GUID 접두사와 조합되어 재구성되었습니다.")
+
+    except Exception as e:
+        logger.error(f"SITE_CODE_MAP 재구성 중 오류 발생: {e}", exc_info=True)
+        sys.exit(1)
+
     compile_parsing_rules()
 
     # --check-id 옵션 처리 (설정 로드 후)
@@ -3489,6 +3778,10 @@ async def main():
     try:
         if CONFIG.get("FORCE_COMPLETE"):
             await run_force_complete_mode(args)
+            return
+
+        if CONFIG.get("FIND_DUPES"):
+            await run_find_dupes_mode(args)
             return
 
         if CONFIG.get("SCAN_FULL") or CONFIG.get("SCAN_PATH"):

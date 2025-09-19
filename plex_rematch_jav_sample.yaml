@@ -125,17 +125,28 @@ ACTORS_DB_PATH: "/PATH/TO/jav_actors2.db"
 TEMP_PATH: "/PATH/TO/TEMP_MOVE"
 
 # ===================================================================
-# JAV 사이트 코드와 Plex 에이전트 GUID 접두사 매핑
-# --search-field site 옵션 사용 시, 또는 검색 결과의 사이트 정보 표시 시 사용됩니다.
-# 사용자가 직접 새로운 사이트를 추가하거나 기존 코드를 수정할 수 있습니다.
+# SJVA 에이전트 설정
 # ===================================================================
-SITE_CODE_MAP:
-  dmm: "com.plexapp.agents.sjva_agent://CD"
-  mgs: "com.plexapp.agents.sjva_agent://CM"
-  jav321: "com.plexapp.agents.sjva_agent://CT"
-  javbus: "com.plexapp.agents.sjva_agent://CB"
-  javdb: "com.plexapp.agents.sjva_agent://CJ"
-  # 예: 새로운 사이트 'mysite'를 추가하고 싶을 경우
-  # mysite: "com.plexapp.agents.sjva_agent://XX"
+# SJVA 에이전트의 기본 GUID 접두사입니다. 보통 수정할 필요 없습니다.
+SJVA_AGENT_GUID_PREFIX: "com.plexapp.agents.sjva_agent://"
 
+# JAV 사이트 약어와 SJVA 에이전트의 사이트 코드를 매핑합니다.
+# 여기에 정의된 코드는 위의 SJVA_AGENT_GUID_PREFIX와 자동으로 조합됩니다.
+# 예: dmm -> com.plexapp.agents.sjva_agent://CD
+SITE_CODE_MAP:
+  dmm:
+    - CD
+    - YMCD
+  mgs:
+    - CM
+    - YMCM
+  jav321:
+    - CT
+    - YMCT
+  javbus:
+    - CB
+    - YMCB
+  javdb:
+    - CJ
+    - YMCJ
 

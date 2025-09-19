@@ -21,13 +21,16 @@
 
 **2025-09-20**
 
--   **신규 기능**: `--update-actors` 옵션 추가 (외부 배우 DB와 비교하여 오래된 정보 업데이트)
+-   **신규 기능**:
+    - `--update-actors` 옵션 추가 (외부 배우 DB와 비교하여 오래된 정보 업데이트)
+    - `--find-dupes` 옵션 추가 (섹션 내에 동일 품번이 중복 등록되어 있는 항목 검색)
 -   **기능 개선**: 인터랙티브 모드(`--fix-labels`, `--search` 등)에서 **Plex Dance** 기능 강화)
     -   단순 DB 제거가 아닌, 파일 시스템 이동, 번들/캐시 청소, 휴지통 비우기를 포함하여 잘못된 썸네일 등 모든 잔여 데이터를 확실하게 제거.
     -   다중 파트 파일(CD1, CD2)도 안전하게 처리.
     -   서버의 "미디어 삭제 허용" 설정과 무관하게 동작하여 파일 삭제 위험 제거.
 -   **기능 개선**: `--force-complete` 옵션을 ID 입력 방식에서 사용자 친화적인 인터랙티브 목록 선택 방식으로 변경.
 -   **기능 개선**: 모든 인터랙티브 모드에서 작업 후 목록이 자동으로 갱신되어, 변경된 ID로 인한 오류 방지.
+-   **기능 개선**: GUID prefix/site map을 yaml에서 설정할 수 있도록 변경
 -   **품번 추출 로직 강화**: YAML로 제공된 정교한 특수/범용 규칙 기반의 새로운 품번 파서(`JAV_PARSING_RULES`)를 도입하여 정확성 대폭 향상.
 -   **버그 수정**: 재매칭 후 업데이트 확인 로직, 품번 비교 로직 등 다수 버그 수정 및 안정성 강화.
 
@@ -144,6 +147,12 @@ python3 plex_rematch_jav.py --section-id 2 --update-actors
 
 ```bash
 python3 plex_rematch_jav.py --section-id 2 --force-complete
+```
+
+#### 중복 품번 검색 (`--find-dupes`)
+
+```bash
+python3 plex_rematch_jav.py --section-id 2 --find-dupes
 ```
 
 ### 4. 라이브러리 스캔
