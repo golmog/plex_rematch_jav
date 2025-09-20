@@ -2266,7 +2266,7 @@ def get_all_media_file_paths(metadata_id: int, cs: sqlite3.Cursor = None) -> Lis
 
 
 async def run_plex_dance_for_item(item_id: int) -> bool:
-    """전통적인 파일 이동 방식의 Plex Dance를 수행합니다."""
+    """Plex Dance를 수행합니다."""
     global PLEX_SERVER_INSTANCE, CONFIG
 
     if not PLEXAPI_AVAILABLE:
@@ -2286,7 +2286,7 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
             logger.error(f"임시 경로 '{temp_path}'를 생성할 수 없습니다: {e}")
             return False
 
-    logger.info(f"ID {item_id}: 전통 방식 Plex Dance 시작...")
+    logger.info(f"ID {item_id}: Plex Dance 시작...")
 
     original_paths = []
     moved_files = {} # {"임시경로": "원본경로"}
