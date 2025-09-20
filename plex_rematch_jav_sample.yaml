@@ -16,6 +16,14 @@ PLEX_URL: "http://127.0.0.1:32400"
 # Plex 접근 토큰 (Plex 서버에서 확인 가능)
 PLEX_TOKEN: "_YOUR_PLEX_TOKEN_" # !!! 반드시 실제 유효한 토큰으로 변경하세요 !!!
 
+# Plex Dance 설정
+# Plex Dance 실행 시 파일을 잠시 이동시켜 둘 임시 폴더 경로입니다.
+# Plex 라이브러리 폴더와는 다른, 안전한 경로를 지정하세요.
+PLEX_DANCE_TEMP_PATH: "/path/to/your/temp_dance_folder"
+# Plex Dance 후 아이템이 라이브러리에 다시 나타날 때까지 기다리는 최대 시간 (초)
+PLEX_DANCE_REAPPEAR_TIMEOUT: 900
+# 아이템 존재 여부를 다시 확인하는 주기 (초)
+PLEX_DANCE_REAPPEAR_INTERVAL: 10
 
 # --- 선택적 설정 ---
 # 값을 지정하지 않으면 스크립트 내의 FALLBACK 기본값 또는 명령행 인자 기본값이 사용됩니다.
@@ -121,12 +129,7 @@ JAV_PARSING_RULES:
 # 배우 정보 DB(FF) 경로
 ACTORS_DB_PATH: "/PATH/TO/jav_actors2.db"
 
-# plex dance용 임시 경로
-TEMP_PATH: "/PATH/TO/TEMP_MOVE"
-
-# ===================================================================
 # SJVA 에이전트 설정
-# ===================================================================
 # SJVA 에이전트의 기본 GUID 접두사입니다. 보통 수정할 필요 없습니다.
 SJVA_AGENT_GUID_PREFIX: "com.plexapp.agents.sjva_agent://"
 
