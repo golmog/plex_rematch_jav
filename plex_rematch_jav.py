@@ -1604,155 +1604,154 @@ async def run_interactive_search_and_rematch_mode(args):
     print(f"\n인터랙티브 검색 및 재매칭 모드 시작: 키워드='{search_keyword_val}', 필드='{search_field_val}', 라이브러리 ID={library_id_val}")
     print("경고: 이 모드에서 재매칭 선택 시, 기본적으로 로컬 JSON 삭제 및 언매치 후 새로운 매칭을 시도합니다.")
 
-    base_s_query = """
-    SELECT
-        mi.id, mi.title, mi.guid, mi.library_section_id, mi.metadata_type,
-        mi.year, mi.original_title, mi.title_sort,
-        MIN(mp.file) AS file_path
-    FROM metadata_items mi
-    LEFT JOIN media_items mpi ON mpi.metadata_item_id = mi.id
-    LEFT JOIN media_parts mp ON mp.media_item_id = mpi.id
-    WHERE mi.library_section_id = ? AND mi.metadata_type = 1
-    """
-    s_params_list = [str(library_id_val)]
-    actual_search_keyword_for_query = search_keyword_val 
+    while not SHUTDOWN_REQUESTED:
+        base_s_query = """
+        SELECT
+            mi.id, mi.title, mi.guid, mi.library_section_id, mi.metadata_type,
+            mi.year, mi.original_title, mi.title_sort,
+            MIN(mp.file) AS file_path
+        FROM metadata_items mi
+        LEFT JOIN media_items mpi ON mpi.metadata_item_id = mi.id
+        LEFT JOIN media_parts mp ON mp.media_item_id = mpi.id
+        WHERE mi.library_section_id = ? AND mi.metadata_type = 1
+        """
+        s_params_list = [str(library_id_val)]
+        actual_search_keyword_for_query = search_keyword_val 
 
-    if search_field_val == 'title':
-        base_s_query += " AND mi.title LIKE ?"
-        s_params_list.append(f'%{actual_search_keyword_for_query}%')
-    elif search_field_val == 'label':
-        base_s_query += " AND mi.title_sort LIKE ?"
-        s_params_list.append(f'%{actual_search_keyword_for_query}%')
-    elif search_field_val == 'site':
-        site_key = actual_search_keyword_for_query.lower()
-        target_prefixes = site_code_map_from_config.get(site_key)
+        if search_field_val == 'title':
+            base_s_query += " AND mi.title LIKE ?"
+            s_params_list.append(f'%{actual_search_keyword_for_query}%')
+        elif search_field_val == 'label':
+            base_s_query += " AND mi.title_sort LIKE ?"
+            s_params_list.append(f'%{actual_search_keyword_for_query}%')
+        elif search_field_val == 'site':
+            site_key = actual_search_keyword_for_query.lower()
+            target_prefixes = site_code_map_from_config.get(site_key)
 
-        if target_prefixes:
-            # 여러 OR 조건을 동적으로 생성
-            or_conditions = " OR ".join(["mi.guid LIKE ?"] * len(target_prefixes))
-            base_s_query += f" AND ({or_conditions})"
-            # 각 조건에 맞는 파라미터 추가
-            s_params_list.extend([f'{prefix}%' for prefix in target_prefixes])
-        else:
-            logger.error(f"알 수 없는 사이트 키워드: '{site_key}'. 사용 가능: {list(site_code_map_from_config.keys())}")
-            return
+            if target_prefixes:
+                # 여러 OR 조건을 동적으로 생성
+                or_conditions = " OR ".join(["mi.guid LIKE ?"] * len(target_prefixes))
+                base_s_query += f" AND ({or_conditions})"
+                # 각 조건에 맞는 파라미터 추가
+                s_params_list.extend([f'{prefix}%' for prefix in target_prefixes])
+            else:
+                logger.error(f"알 수 없는 사이트 키워드: '{site_key}'. 사용 가능: {list(site_code_map_from_config.keys())}")
+                return
 
-    base_s_query += " GROUP BY mi.id"
-    final_s_query = base_s_query
+        base_s_query += " GROUP BY mi.id"
 
-    if SHUTDOWN_REQUESTED: logger.warning("검색 쿼리 실행 전 종료 요청 수신."); return
-    search_result_rows = await await_sync(fetch_all, final_s_query, tuple(s_params_list))
+        search_result_rows = await await_sync(fetch_all, base_s_query, tuple(s_params_list))
 
-    if search_result_rows:
-        logger.debug("검색 결과를 자연 정렬합니다...")
-        try:
-            search_result_rows.sort(key=lambda row: natural_sort_key(row['title_sort'] or row['title'] or ''))
-        except Exception as e_sort:
-            logger.warning(f"검색 결과 정렬 중 오류 발생: {e_sort}. 정렬 없이 진행합니다.")
+        if not search_result_rows:
+            # return 대신 break를 사용하여 while 루프를 정상적으로 종료하도록 수정
+            logger.info("검색 결과가 더 이상 없습니다. 모드를 종료합니다.")
+            break
 
-    if not search_result_rows:
-        logger.info("검색 결과가 없습니다."); return
+        if search_result_rows:
+            logger.debug("검색 결과를 자연 정렬합니다...")
+            try:
+                search_result_rows.sort(key=lambda row: natural_sort_key(row['title_sort'] or row['title'] or ''))
+            except Exception as e_sort:
+                logger.warning(f"검색 결과 정렬 중 오류 발생: {e_sort}. 정렬 없이 진행합니다.")
 
-    items_for_user_action = [] 
-    print(f"\n--- 검색 결과 ({len(search_result_rows)}개) ---")
-    # 헤더 형식 정의
-    header_fmt_search = "{idx:<5s} {id:<7s} | {guid_display:<16s} | {site:<8s}"
-    header_title_part_search = "제목 (DB)" # 너비는 유동적이므로 따로 관리
-    # 여기서는 전체 너비를 대략적으로 맞추기 위해 print("-" * 110) 사용
-    print(f"{header_fmt_search.format(idx='No.', id='ID', guid_display='GUID', site='SITE')} | {header_title_part_search}")
-    print("-" * (len(header_fmt_search.format(idx="", id="", guid_display="", site="")) + 3 + 50 )) # 제목 너비 대략 50으로 가정
+        items_for_user_action = [] 
+        print(f"\n--- 검색 결과 ({len(search_result_rows)}개) ---")
+        # 헤더 형식 정의
+        header_fmt_search = "{idx:<5s} {id:<7s} | {guid_display:<16s} | {site:<8s}"
+        header_title_part_search = "제목 (DB)" # 너비는 유동적이므로 따로 관리
+        # 여기서는 전체 너비를 대략적으로 맞추기 위해 print("-" * 110) 사용
+        print(f"{header_fmt_search.format(idx='No.', id='ID', guid_display='GUID', site='SITE')} | {header_title_part_search}")
+        print("-" * (len(header_fmt_search.format(idx="", id="", guid_display="", site="")) + 3 + 50 )) # 제목 너비 대략 50으로 가정
 
-    for i_s_row, db_row_searched_item in enumerate(search_result_rows):
-        item_s_id_val = db_row_searched_item['id']
-        item_s_title_val = db_row_searched_item['title'] if 'title' in db_row_searched_item.keys() and db_row_searched_item['title'] is not None else "N/A"
-        item_s_guid_val = db_row_searched_item['guid'] if 'guid' in db_row_searched_item.keys() and db_row_searched_item['guid'] is not None else "N/A"
-        item_s_media_path_val = db_row_searched_item['file_path'] if 'file_path' in db_row_searched_item.keys() and db_row_searched_item['file_path'] is not None else None
+        for i_s_row, db_row_searched_item in enumerate(search_result_rows):
+            item_s_id_val = db_row_searched_item['id']
+            item_s_title_val = db_row_searched_item['title'] if 'title' in db_row_searched_item.keys() and db_row_searched_item['title'] is not None else "N/A"
+            item_s_guid_val = db_row_searched_item['guid'] if 'guid' in db_row_searched_item.keys() and db_row_searched_item['guid'] is not None else "N/A"
+            item_s_media_path_val = db_row_searched_item['file_path'] if 'file_path' in db_row_searched_item.keys() and db_row_searched_item['file_path'] is not None else None
 
-        filename_pid_padded_search = None # 각 루프 시작 시 초기화
-        if item_s_media_path_val:
-            base_filename_for_pid = os.path.basename(item_s_media_path_val)
-            extracted_fn_pid = extract_product_id_from_filename(base_filename_for_pid)
-            if extracted_fn_pid:
-                filename_pid_padded_search = extracted_fn_pid
-        display_site_code_search = "N/A"
-        display_guid_to_print_search = "N/A"
-
-        if item_s_guid_val and item_s_guid_val != "N/A":
-            base_sjva_agent_prefix = CONFIG.get("SJVA_AGENT_GUID_PREFIX")
-            is_sjva_guid = False
-
-            for site_key, full_prefixes_list in site_code_map_from_config.items():
-                if any(item_s_guid_val.startswith(p) for p in full_prefixes_list):
-                    # 일치하는 접두사를 찾으면 사이트 정보 설정하고 루프 탈출
-                    display_site_code_search = site_key.upper()
-
-                    # 어떤 접두사와 일치했는지 찾아서 GUID 내용 생성
-                    matched_prefix = next(p for p in full_prefixes_list if item_s_guid_val.startswith(p))
-                    site_code_in_map = matched_prefix.replace(base_sjva_agent_prefix, "")
-                    content_id_part = item_s_guid_val.replace(matched_prefix, "", 1)
-                    display_guid_to_print_search = site_code_in_map + content_id_part
-
-                    is_sjva_guid = True
-                    break # 바깥쪽 for 루프 탈출
-
-            if not is_sjva_guid and item_s_guid_val.startswith(base_sjva_agent_prefix):
-                is_sjva_guid = True
-                content_id_part = item_s_guid_val.replace(base_sjva_agent_prefix, "")
-                display_guid_to_print_search = content_id_part
-                display_site_code_search = "SJVA_GEN"
-
-            if not is_sjva_guid:
-                try:
-                    uri_p = urllib.parse.urlparse(item_s_guid_val)
-                    display_site_code_search = uri_p.scheme.upper() if uri_p.scheme else "UNKNOWN"
-                    if uri_p.netloc:
-                        display_site_code_search += f":{uri_p.netloc.split('.')[0][:8]}" if '.' in uri_p.netloc else f":{uri_p.netloc[:8]}"
-                    path_parts = uri_p.path.strip('/').split('/')
-                    current_display_guid_path = path_parts[0] if path_parts and path_parts[0] else uri_p.path
-                    if len(path_parts) > 1 and path_parts[0]:
-                        current_display_guid_path += f"/{path_parts[1][:10]}" if len(path_parts[1]) > 10 else f"/{path_parts[1]}"
-                    display_guid_to_print_search = current_display_guid_path
-                    if uri_p.query: # 쿼리 파라미터가 있다면 일단 포함 (나중에 ? 로 자름)
-                        display_guid_to_print_search += f"?{uri_p.query}"
-                except Exception:
-                    display_guid_to_print_search = item_s_guid_val
-                    display_site_code_search = "OTHER_ERR"
-
-            if '?' in display_guid_to_print_search:
-                display_guid_to_print_search = display_guid_to_print_search.split('?', 1)[0]
-
-        elif not item_s_guid_val or item_s_guid_val == "N/A":
-            display_guid_to_print_search = "No GUID"
+            filename_pid_padded_search = None # 각 루프 시작 시 초기화
+            if item_s_media_path_val:
+                base_filename_for_pid = os.path.basename(item_s_media_path_val)
+                extracted_fn_pid = extract_product_id_from_filename(base_filename_for_pid)
+                if extracted_fn_pid:
+                    filename_pid_padded_search = extracted_fn_pid
             display_site_code_search = "N/A"
+            display_guid_to_print_search = "N/A"
 
-        guid_for_print_final = display_guid_to_print_search[:14] + ".." if len(display_guid_to_print_search) > 16 else display_guid_to_print_search
-        site_for_print_final = display_site_code_search[:6] + ".." if len(display_site_code_search) > 8 else display_site_code_search
+            if item_s_guid_val and item_s_guid_val != "N/A":
+                base_sjva_agent_prefix = CONFIG.get("SJVA_AGENT_GUID_PREFIX")
+                is_sjva_guid = False
 
-        items_for_user_action.append({
-            'idx_display': str(i_s_row + 1),
-            'id': item_s_id_val,
-            'title': item_s_title_val,
-            'guid': item_s_guid_val, 
-            'site_display': display_site_code_search, 
-            'guid_display_content': display_guid_to_print_search,
-            'file_pid_raw': filename_pid_padded_search,
-            'norm_file_pid': normalize_pid_for_comparison(filename_pid_padded_search),
-            'original_row': db_row_searched_item
-        })
-        
-        title_display_limited_search = item_s_title_val[:48] + ('..' if len(item_s_title_val) > 50 else '')
-        print(f"{header_fmt_search.format(idx=str(i_s_row+1), id=str(item_s_id_val), guid_display=guid_for_print_final, site=site_for_print_final)} | {title_display_limited_search}")
+                for site_key, full_prefixes_list in site_code_map_from_config.items():
+                    if any(item_s_guid_val.startswith(p) for p in full_prefixes_list):
+                        # 일치하는 접두사를 찾으면 사이트 정보 설정하고 루프 탈출
+                        display_site_code_search = site_key.upper()
 
-    if SHUTDOWN_REQUESTED: logger.warning("목록 출력 후 종료 요청 수신."); return
-    if not items_for_user_action: logger.info("사용자에게 제시할 최종 검색 결과가 없습니다."); return
+                        # 어떤 접두사와 일치했는지 찾아서 GUID 내용 생성
+                        matched_prefix = next(p for p in full_prefixes_list if item_s_guid_val.startswith(p))
+                        site_code_in_map = matched_prefix.replace(base_sjva_agent_prefix, "")
+                        content_id_part = item_s_guid_val.replace(matched_prefix, "", 1)
+                        display_guid_to_print_search = site_code_in_map + content_id_part
 
-    # --match-limit 가져오기
-    current_match_limit = CONFIG.get("MATCH_LIMIT", 0)
-    if current_match_limit > 0:
-        logger.info(f"--match-limit: 이 세션에서 최대 {current_match_limit}개 아이템만 처리합니다.")
+                        is_sjva_guid = True
+                        break # 바깥쪽 for 루프 탈출
 
-    while True: 
-        if SHUTDOWN_REQUESTED or user_has_quit_this_mode: break
+                if not is_sjva_guid and item_s_guid_val.startswith(base_sjva_agent_prefix):
+                    is_sjva_guid = True
+                    content_id_part = item_s_guid_val.replace(base_sjva_agent_prefix, "")
+                    display_guid_to_print_search = content_id_part
+                    display_site_code_search = "SJVA_GEN"
+
+                if not is_sjva_guid:
+                    try:
+                        uri_p = urllib.parse.urlparse(item_s_guid_val)
+                        display_site_code_search = uri_p.scheme.upper() if uri_p.scheme else "UNKNOWN"
+                        if uri_p.netloc:
+                            display_site_code_search += f":{uri_p.netloc.split('.')[0][:8]}" if '.' in uri_p.netloc else f":{uri_p.netloc[:8]}"
+                        path_parts = uri_p.path.strip('/').split('/')
+                        current_display_guid_path = path_parts[0] if path_parts and path_parts[0] else uri_p.path
+                        if len(path_parts) > 1 and path_parts[0]:
+                            current_display_guid_path += f"/{path_parts[1][:10]}" if len(path_parts[1]) > 10 else f"/{path_parts[1]}"
+                        display_guid_to_print_search = current_display_guid_path
+                        if uri_p.query: # 쿼리 파라미터가 있다면 일단 포함 (나중에 ? 로 자름)
+                            display_guid_to_print_search += f"?{uri_p.query}"
+                    except Exception:
+                        display_guid_to_print_search = item_s_guid_val
+                        display_site_code_search = "OTHER_ERR"
+
+                if '?' in display_guid_to_print_search:
+                    display_guid_to_print_search = display_guid_to_print_search.split('?', 1)[0]
+
+            elif not item_s_guid_val or item_s_guid_val == "N/A":
+                display_guid_to_print_search = "No GUID"
+                display_site_code_search = "N/A"
+
+            guid_for_print_final = display_guid_to_print_search[:14] + ".." if len(display_guid_to_print_search) > 16 else display_guid_to_print_search
+            site_for_print_final = display_site_code_search[:6] + ".." if len(display_site_code_search) > 8 else display_site_code_search
+
+            items_for_user_action.append({
+                'idx_display': str(i_s_row + 1),
+                'id': item_s_id_val,
+                'title': item_s_title_val,
+                'guid': item_s_guid_val, 
+                'site_display': display_site_code_search, 
+                'guid_display_content': display_guid_to_print_search,
+                'file_pid_raw': filename_pid_padded_search,
+                'norm_file_pid': normalize_pid_for_comparison(filename_pid_padded_search),
+                'original_row': db_row_searched_item
+            })
+            
+            title_display_limited_search = item_s_title_val[:48] + ('..' if len(item_s_title_val) > 50 else '')
+            print(f"{header_fmt_search.format(idx=str(i_s_row+1), id=str(item_s_id_val), guid_display=guid_for_print_final, site=site_for_print_final)} | {title_display_limited_search}")
+
+        if SHUTDOWN_REQUESTED: logger.warning("목록 출력 후 종료 요청 수신."); return
+        if not items_for_user_action: logger.info("사용자에게 제시할 최종 검색 결과가 없습니다."); return
+
+        # --match-limit 가져오기
+        current_match_limit = CONFIG.get("MATCH_LIMIT", 0)
+        if current_match_limit > 0:
+            logger.info(f"--match-limit: 이 세션에서 최대 {current_match_limit}개 아이템만 처리합니다.")
+
         if current_match_limit > 0 and processed_items_count_this_mode >= current_match_limit:
             logger.info(f"--match-limit ({current_match_limit}개) 도달. 인터랙티브 검색 모드 추가 처리 중단.")
             break
@@ -2085,12 +2084,14 @@ async def run_interactive_search_and_rematch_mode(args):
                     logger.info("수동 폴백 매칭을 진행하지 않습니다.")
             else:
                 logger.info("[SEARCH] 자동 매칭 후 추가 수동 폴백 대상이 없습니다.")
-        
-        if user_input_str_val == 'all' and (match_mode_choice == 'm' or match_mode_choice == 'a'):
+
+        if user_input_str_val == 'all' and (match_mode_choice in ['m', 'a', 'd']):
             logger.info("'all' 옵션에 대한 처리가 완료되었습니다. --search 모드를 종료합니다.")
             user_has_quit_this_mode = True 
-        
-        if user_has_quit_this_mode or SHUTDOWN_REQUESTED : break
+        else:
+            if match_mode_choice in ['a', 'm', 'd']:
+                logger.info("선택한 항목에 대한 작업이 완료되었습니다. 다음 작업을 위해 프롬프트를 다시 표시합니다...")
+                await asyncio.sleep(2)
 
     logger.info(f"--search (인터랙티브) 모드 완료/중단. 총 {processed_items_count_this_mode}개 아이템 재매칭 시도됨.")
 
@@ -2322,13 +2323,44 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
 
         if CONFIG.get("DRY_RUN"):
             logger.info(f"[DRY RUN] ID {item_id} ('{item_title_log}')에 대한 Plex Dance 시뮬레이션:")
+            logger.info(f"  - 관련 .json 파일 삭제 (시뮬레이션)")
             for path in original_paths:
                 logger.info(f"  - 파일 이동 (시뮬레이션): '{path}' -> '{temp_path}'")
             logger.info("  - 라이브러리 스캔, 휴지통 비우기, 파일 원위치, 재스캔 (건너뜀)")
             return True
 
+        # 로컬 .json 파일 삭제
+        logger.info(f"  1/7. ID {item_id}: 관련 로컬 .json 파일을 찾아 삭제합니다...")
+        # 아이템에 여러 파일이 있을 수 있으므로, 각 파일에 대해 .json을 찾습니다.
+        json_files_deleted = 0
+        for media_path in original_paths:
+            try:
+                video_dir = os.path.dirname(media_path)
+                base_filename = os.path.basename(media_path)
+
+                # SJVA 에이전트의 .json 파일명 규칙 (파일명의 첫 단어(품번) + .json)
+                pid_match_for_json = re.match(r"^([a-zA-Z0-9\-]+)", base_filename)
+                if pid_match_for_json:
+                    json_filename = f"{pid_match_for_json.group(1).lower()}.json"
+                    json_file_path = os.path.join(video_dir, json_filename)
+                    if os.path.exists(json_file_path):
+                        await await_sync(os.remove, json_file_path)
+                        logger.info(f"    - JSON 파일 삭제 완료: {json_file_path}")
+                        json_files_deleted += 1
+                    else:
+                        logger.debug(f"    - 해당 경로에 JSON 파일 없음: {json_file_path}")
+                else:
+                    logger.warning(f"    - 파일명 '{base_filename}'에서 .json 파일명 생성을 위한 품번 추출 실패.")
+            except Exception as e_json_del:
+                logger.error(f"    - 로컬 JSON 파일 처리 중 오류 발생: {e_json_del}", exc_info=True)
+
+        if json_files_deleted > 0:
+            logger.info(f"  ...총 {json_files_deleted}개의 .json 파일을 삭제했습니다.")
+        else:
+            logger.info("  ...삭제할 관련 .json 파일을 찾지 못했습니다.")
+
         # 미디어 파일들을 임시 경로로 이동
-        logger.info(f"  1/6. ID {item_id}: {len(original_paths)}개의 미디어 파일을 '{temp_path}'로 이동합니다...")
+        logger.info(f"  2/7. ID {item_id}: {len(original_paths)}개의 미디어 파일을 '{temp_path}'로 이동합니다...")
         for src_path in original_paths:
             if not os.path.exists(src_path):
                 logger.warning(f"    - 원본 파일 없음, 건너뜀: {src_path}")
@@ -2352,7 +2384,7 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
             return False
 
         # 라이브러리 스캔 (파일 제거 감지)
-        logger.info(f"  2/6. '{library.title}' 라이브러리의 관련 경로들을 스캔하여 파일 제거를 감지합니다...")
+        logger.info(f"  3/7. '{library.title}' 라이브러리의 관련 경로들을 스캔하여 파일 제거를 감지합니다...")
         for scan_dir in scan_dirs:
             mapped_dir = map_scan_path(scan_dir)
             logger.info(f"    - 경로 스캔 중: {mapped_dir}")
@@ -2365,16 +2397,22 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
             active_tasks = await get_plex_library_activities(library)
             if not active_tasks: break
             logger.info(f"  ...스캔 진행 중: {active_tasks[0].title} ({getattr(active_tasks[0], 'progress', 0):.0f}%)")
-            await asyncio.sleep(15)
+            await asyncio.sleep(5)
         logger.info("  ...스캔 완료.")
         if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Plex Dance 중단 요청")
 
         # 휴지통 비우기
-        logger.info("  3/6. 라이브러리 휴지통을 비우고 아이템이 완전히 삭제될 때까지 대기합니다...")
+        logger.info("  4/7. 라이브러리 휴지통을 비우고 아이템이 완전히 삭제될 때까지 대기합니다...")
         await await_sync(library.emptyTrash)
 
-        timeout_seconds = CONFIG.get("PLEX_DANCE_EMPTY_TRASH_TIMEOUT", 300)
-        check_interval_seconds = CONFIG.get("PLEX_DANCE_EMPTY_TRASH_INTERVAL", 5)
+        try:
+            timeout_seconds = int(CONFIG.get("PLEX_DANCE_EMPTY_TRASH_TIMEOUT", 300))
+            check_interval_seconds = int(CONFIG.get("PLEX_DANCE_EMPTY_TRASH_INTERVAL", 5))
+        except (ValueError, TypeError):
+            # YAML에 숫자가 아닌 값이 들어갔을 경우를 대비한 안전장치
+            logger.warning("Plex Dance 대기 시간 설정값이 유효하지 않습니다. 기본값을 사용합니다.")
+            timeout_seconds = 300
+            check_interval_seconds = 5
 
         logger.info(f"  ...DB에서 ID {item_id}가 사라지는 것을 확인합니다 (최대 {timeout_seconds / 60:.1f}분)...")
         start_time = time.monotonic()
@@ -2399,7 +2437,7 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
             raise Exception(f"ID {item_id}의 휴지통 비우기 확인 실패")
 
         # 번들 정리 실행
-        logger.info("  4/6. 서버 전체의 미사용 번들을 정리합니다...")
+        logger.info("  5/7. 서버 전체의 미사용 번들을 정리합니다...")
         await await_sync(PLEX_SERVER_INSTANCE.library.cleanBundles)
 
         # 번들 정리는 백그라운드 작업이므로, 활동 상태를 모니터링하며 대기합니다.
@@ -2420,21 +2458,26 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
         if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Plex Dance 중단 요청")
 
         # 파일들을 원래 위치로 복원
-        logger.info(f"  5/6. {len(moved_files)}개의 미디어 파일을 원래 위치로 복원합니다...")
+        logger.info(f"  6/7. {len(moved_files)}개의 미디어 파일을 원래 위치로 복원합니다...")
         for dest_path, src_path in moved_files.items():
             await await_sync(shutil.move, dest_path, src_path)
             logger.info(f"    - 복원 완료: '{os.path.basename(src_path)}'")
         moved_files.clear() # 복원 후 목록 비우기
 
         # 라이브러리 다시 스캔 (새로운 아이템으로 추가)
-        logger.info(f"  6/6. '{library.title}' 라이브러리의 관련 경로들을 다시 스캔하여 아이템 추가를 요청합니다...")
+        logger.info(f"  7/7. '{library.title}' 라이브러리의 관련 경로들을 다시 스캔하여 아이템 추가를 요청합니다...")
         for scan_dir in scan_dirs:
             mapped_dir = map_scan_path(scan_dir)
             logger.info(f"    - 경로 재스캔 요청: {mapped_dir}")
             await await_sync(library.update, path=mapped_dir)
 
-        timeout_seconds = CONFIG.get("PLEX_DANCE_REAPPEAR_TIMEOUT", 900)
-        check_interval_seconds = CONFIG.get("PLEX_DANCE_REAPPEAR_INTERVAL", 10)
+        try:
+            timeout_seconds = int(CONFIG.get("PLEX_DANCE_REAPPEAR_TIMEOUT", 600))
+            check_interval_seconds = int(CONFIG.get("PLEX_DANCE_REAPPEAR_INTERVAL", 5))
+        except (ValueError, TypeError):
+            logger.warning("Plex Dance 복구 대기 시간 설정값이 유효하지 않습니다. 기본값을 사용합니다.")
+            timeout_seconds = 600
+            check_interval_seconds = 5
 
         logger.info(f"  ...아이템이 라이브러리에 다시 나타날 때까지 대기합니다 (최대 {timeout_seconds / 60:.1f}분)...")
         start_time = time.monotonic()
@@ -2993,9 +3036,14 @@ async def run_fix_labels_mode(args):
             else:
                 logger.info("[FIXLABELS] 자동 매칭 후 추가 수동 폴백 대상이 없습니다.")
 
-        if user_input_raw_str_fix == 'all' and (match_mode_choice_fix == 'm' or match_mode_choice_fix == 'a'):
+        if user_input_raw_str_fix == 'all' and (match_mode_choice_fix in ['a', 'm', 'd']):
             logger.info("'all' 옵션에 대한 처리가 완료되었습니다. --fix-labels 모드를 종료합니다.")
             user_has_quit_interaction_fix = True 
+        else:
+            # 'q'나 'c'가 아닌 유효한 작업이 수행되었을 경우
+            if match_mode_choice_fix in ['a', 'm', 'd']:
+                logger.info("선택한 항목에 대한 작업이 완료되었습니다. 목록을 새로고침하고 다음 작업을 준비합니다...")
+                await asyncio.sleep(2)
 
         if user_has_quit_interaction_fix or SHUTDOWN_REQUESTED : break
 
@@ -3198,9 +3246,8 @@ async def run_no_poster_mode(args):
         if user_input == 'all':
             logger.info("'all' 옵션 처리가 완료되었습니다. 모드를 종료합니다.")
             break
-
-        if not SHUTDOWN_REQUESTED:
-            logger.info("\n다음 선택을 위해 3초 후 목록을 새로고침합니다...")
+        else:
+            logger.info("선택한 항목에 대한 작업이 완료되었습니다. 목록을 새로고침하고 다음 작업을 준비합니다...")
             try:
                 await asyncio.sleep(3)
             except asyncio.CancelledError:
@@ -3789,6 +3836,8 @@ async def run_find_dupes_mode(args):
 
         if user_input_str == 'all':
             logger.info("'all' 옵션에 대한 처리가 완료되었습니다. --find-dupes 모드를 종료합니다."); break
+        else:
+            logger.info("선택한 그룹에 대한 작업이 완료되었습니다. 목록을 새로고침하고 다음 작업을 준비합니다...")
 
     logger.info(f"--find-dupes 모드 완료. 총 {processed_items_count}개 아이템 처리 시도됨.")
 
