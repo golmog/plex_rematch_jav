@@ -50,8 +50,10 @@ FALLBACK_DEFAULT_CONFIG = {
     "PLEX_TOKEN": None, # YAML 또는 CLI에서 필수로 받아야 함
 
     "PLEX_DANCE_TEMP_PATH": None,
-    "PLEX_DANCE_REAPPEAR_TIMEOUT": 900,  # 15분 (초 단위)
-    "PLEX_DANCE_REAPPEAR_INTERVAL": 10,  # 10초
+    "PLEX_DANCE_REAPPEAR_TIMEOUT": 600,
+    "PLEX_DANCE_REAPPEAR_INTERVAL": 5,
+    "PLEX_DANCE_EMPTY_TRASH_TIMEOUT": 300,
+    "PLEX_DANCE_EMPTY_TRASH_INTERVAL": 5,
 
     "WORKERS": 2,
     "CHECK_INTERVAL": 3,
@@ -295,6 +297,15 @@ def check_items_exist_by_paths(file_paths: List[str], cs: sqlite3.Cursor = None)
 
     # 모든 경로가 존재하면 True 반환
     return True
+
+
+@require_cursor("PLEX_DB", read_only=True)
+def check_item_deleted_by_id(metadata_id: int, cs: sqlite3.Cursor = None) -> bool:
+    """주어진 metadata_id가 DB에서 완전히 삭제되었는지 확인합니다."""
+    query = "SELECT 1 FROM metadata_items WHERE id = ?"
+    row = cs.execute(query, (metadata_id,)).fetchone()
+    # row가 없으면 (None) 삭제된 것이므로 True를 반환
+    return row is None
 
 
 def format_numeric_for_search(num_str: str, min_digits: int = 3) -> str:
@@ -2317,7 +2328,7 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
             return True
 
         # 미디어 파일들을 임시 경로로 이동
-        logger.info(f"  - ID {item_id}: {len(original_paths)}개의 미디어 파일을 '{temp_path}'로 이동합니다...")
+        logger.info(f"  1/6. ID {item_id}: {len(original_paths)}개의 미디어 파일을 '{temp_path}'로 이동합니다...")
         for src_path in original_paths:
             if not os.path.exists(src_path):
                 logger.warning(f"    - 원본 파일 없음, 건너뜀: {src_path}")
@@ -2341,7 +2352,7 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
             return False
 
         # 라이브러리 스캔 (파일 제거 감지)
-        logger.info(f"  2. '{library.title}' 라이브러리의 관련 경로들을 스캔하여 파일 제거를 감지합니다...")
+        logger.info(f"  2/6. '{library.title}' 라이브러리의 관련 경로들을 스캔하여 파일 제거를 감지합니다...")
         for scan_dir in scan_dirs:
             mapped_dir = map_scan_path(scan_dir)
             logger.info(f"    - 경로 스캔 중: {mapped_dir}")
@@ -2359,15 +2370,38 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
         if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Plex Dance 중단 요청")
 
         # 휴지통 비우기
-        logger.info("  - 라이브러리 휴지통을 비웁니다...")
+        logger.info("  3/6. 라이브러리 휴지통을 비우고 아이템이 완전히 삭제될 때까지 대기합니다...")
         await await_sync(library.emptyTrash)
-        logger.info("  ...휴지통 비우기 완료.")
-        await asyncio.sleep(5) # 휴지통 비우기 후 안정화 시간
+
+        timeout_seconds = CONFIG.get("PLEX_DANCE_EMPTY_TRASH_TIMEOUT", 300)
+        check_interval_seconds = CONFIG.get("PLEX_DANCE_EMPTY_TRASH_INTERVAL", 5)
+
+        logger.info(f"  ...DB에서 ID {item_id}가 사라지는 것을 확인합니다 (최대 {timeout_seconds / 60:.1f}분)...")
+        start_time = time.monotonic()
+        item_is_deleted = False
+
+        while time.monotonic() - start_time < timeout_seconds:
+            if SHUTDOWN_REQUESTED:
+                raise asyncio.CancelledError("휴지통 비우기 대기 중 중단 요청")
+
+            if await await_sync(check_item_deleted_by_id, item_id):
+                logger.info(f"  ...성공! ID {item_id}가 라이브러리 DB에서 완전히 제거되었습니다.")
+                item_is_deleted = True
+                break
+
+            remaining_time = timeout_seconds - (time.monotonic() - start_time)
+            logger.debug(f"  ...아직 삭제되지 않음. {check_interval_seconds}초 후 다시 확인합니다. (남은 시간: {remaining_time:.0f}초)")
+            await asyncio.sleep(check_interval_seconds)
+
+        if not item_is_deleted:
+            logger.error(f"  ...실패! 제한 시간({timeout_seconds / 60:.1f}분) 내에 아이템이 DB에서 제거되지 않았습니다. Plex Dance를 중단합니다.")
+            # 이 경우 파일 복원을 시도하고 실패로 종료해야 함
+            raise Exception(f"ID {item_id}의 휴지통 비우기 확인 실패")
 
         # 번들 정리 실행
-        logger.info("  - 서버 전체의 미사용 번들을 정리합니다...")
+        logger.info("  4/6. 서버 전체의 미사용 번들을 정리합니다...")
         await await_sync(PLEX_SERVER_INSTANCE.library.cleanBundles)
-        
+
         # 번들 정리는 백그라운드 작업이므로, 활동 상태를 모니터링하며 대기합니다.
         logger.info("  ...번들 정리 작업이 완료될 때까지 대기합니다...")
         while not SHUTDOWN_REQUESTED:
@@ -2386,14 +2420,14 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
         if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Plex Dance 중단 요청")
 
         # 파일들을 원래 위치로 복원
-        logger.info(f"  - {len(moved_files)}개의 미디어 파일을 원래 위치로 복원합니다...")
+        logger.info(f"  5/6. {len(moved_files)}개의 미디어 파일을 원래 위치로 복원합니다...")
         for dest_path, src_path in moved_files.items():
             await await_sync(shutil.move, dest_path, src_path)
             logger.info(f"    - 복원 완료: '{os.path.basename(src_path)}'")
         moved_files.clear() # 복원 후 목록 비우기
 
         # 라이브러리 다시 스캔 (새로운 아이템으로 추가)
-        logger.info(f"  5. '{library.title}' 라이브러리의 관련 경로들을 다시 스캔하여 아이템 추가를 요청합니다...")
+        logger.info(f"  6/6. '{library.title}' 라이브러리의 관련 경로들을 다시 스캔하여 아이템 추가를 요청합니다...")
         for scan_dir in scan_dirs:
             mapped_dir = map_scan_path(scan_dir)
             logger.info(f"    - 경로 재스캔 요청: {mapped_dir}")

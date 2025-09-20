@@ -21,9 +21,14 @@ PLEX_TOKEN: "_YOUR_PLEX_TOKEN_" # !!! 반드시 실제 유효한 토큰으로 �
 # Plex 라이브러리 폴더와는 다른, 안전한 경로를 지정하세요.
 PLEX_DANCE_TEMP_PATH: "/path/to/your/temp_dance_folder"
 # Plex Dance 후 아이템이 라이브러리에 다시 나타날 때까지 기다리는 최대 시간 (초)
-PLEX_DANCE_REAPPEAR_TIMEOUT: 900
+PLEX_DANCE_REAPPEAR_TIMEOUT: 600
 # 아이템 존재 여부를 다시 확인하는 주기 (초)
-PLEX_DANCE_REAPPEAR_INTERVAL: 10
+PLEX_DANCE_REAPPEAR_INTERVAL: 5
+# 휴지통 비우기 타임아웃 (초)
+PLEX_DANCE_EMPTY_TRASH_TIMEOUT: 300,
+# 휴지통 비우기 확인 주기 (초)
+PLEX_DANCE_EMPTY_TRASH_INTERVAL: 5,
+
 
 # --- 선택적 설정 ---
 # 값을 지정하지 않으면 스크립트 내의 FALLBACK 기본값 또는 명령행 인자 기본값이 사용됩니다.
