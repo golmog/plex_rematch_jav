@@ -51,7 +51,7 @@ FALLBACK_DEFAULT_CONFIG = {
 
     "PLEX_DANCE_TEMP_PATH": None,
     "PLEX_DANCE_REAPPEAR_TIMEOUT": 600,
-    "PLEX_DANCE_REAPPEAR_INTERVAL": 5,
+    "PLEX_DANCE_REAPPEAR_INTERVAL": 10,
     "PLEX_DANCE_EMPTY_TRASH_TIMEOUT": 300,
     "PLEX_DANCE_EMPTY_TRASH_INTERVAL": 5,
 
@@ -2479,7 +2479,7 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
 
         try:
             timeout_seconds = int(CONFIG.get("PLEX_DANCE_REAPPEAR_TIMEOUT", 600))
-            check_interval_seconds = int(CONFIG.get("PLEX_DANCE_REAPPEAR_INTERVAL", 5))
+            check_interval_seconds = int(CONFIG.get("PLEX_DANCE_REAPPEAR_INTERVAL", 10))
         except (ValueError, TypeError):
             logger.warning("Plex Dance 복구 대기 시간 설정값이 유효하지 않습니다. 기본값을 사용합니다.")
             timeout_seconds = 600
@@ -3612,7 +3612,7 @@ async def run_find_dupes_mode(args):
         # 1. DB에서 모든 아이템 정보 가져오기
         query = """
         SELECT 
-            mi.id, mi.title, mi.guid, mi.title_sort, MIN(mp.file) AS file_path
+            mi.id, mi.title, mi.guid, mi.title_sort, mi.library_section_id, MIN(mp.file) AS file_path
         FROM metadata_items mi
         LEFT JOIN media_items mpi ON mpi.metadata_item_id = mi.id
         LEFT JOIN media_parts mp ON mp.media_item_id = mpi.id
