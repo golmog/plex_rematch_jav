@@ -1379,6 +1379,12 @@ async def run_manual_interactive_rematch_for_item(
     item_title = item_data.get('title', f"ID {item_id}")
     original_row_for_matches = item_data.get('original_row')
 
+    file_path = item_data.get('file_path') or item_data.get('original_row', {}).get('file_path')
+    display_filename = os.path.basename(file_path) if file_path else "파일 경로를 찾을 수 없음"
+    print(f"\n──────────────────────────────────────────────────────────────────")
+    print(f"  현재 작업 대상 파일: {display_filename}")
+    print(f"──────────────────────────────────────────────────────────────────")
+
     original_file_pid_raw_for_hint = item_data.get('file_pid_raw')
     original_file_pid_parts_for_hint = None
     if original_file_pid_raw_for_hint:
