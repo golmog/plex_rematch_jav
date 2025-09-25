@@ -102,6 +102,8 @@ FALLBACK_DEFAULT_CONFIG = {
             ]
     },
 
+    "ACTORS_DB_PATH": None, # 배우 DB 경로
+
     # 수정 금지 (스크립트 내부 또는 옵션으로 제어) - YAML에 넣지 않음
     "DRY_RUN": False,
     "FORCE_REMATCH": False,
@@ -116,9 +118,10 @@ FALLBACK_DEFAULT_CONFIG = {
 CONFIG = {}
 PLEX_SERVER_INSTANCE = None
 SHUTDOWN_REQUESTED = False
+ACTORS_DB_CACHE = None
 
-PLEX_MEDIA_TYPE_VALUES = {1: 'movie', 2: 'show', 8: 'artist', 13: 'photoalbum'}
-PLEX_SECTION_TYPE_VALUES = {1: "영화", 2: "TV 프로그램", 8: "음악", 13: "사진"}
+PLEX_MEDIA_TYPE_VALUES = {1: 'movie', 13: 'photoalbum'}
+PLEX_SECTION_TYPE_VALUES = {1: "영화", 13: "사진"}
 MATCH_CANDIDATE_EXCLUDED_GUID_PREFIXES = ['collection://']
 
 def setup_logging(verbosity: int):
@@ -308,6 +311,122 @@ def check_item_deleted_by_id(metadata_id: int, cs: sqlite3.Cursor = None) -> boo
     return row is None
 
 
+# 배우 DB 조회를 위한 전용 커서 데코레이터
+def require_actors_db_cursor(f):
+    @functools.wraps(f)
+    def wrap(*args, **kwds):
+        db_path = CONFIG.get("ACTORS_DB_PATH")
+        if not db_path:
+            logger.error("배우 DB 경로(ACTORS_DB_PATH)가 설정되지 않았습니다.")
+            return None # 또는 적절한 예외 처리
+
+        if not os.path.exists(db_path):
+            logger.error(f"배우 DB 파일을 찾을 수 없습니다: {db_path}")
+            return None
+
+        try:
+            # 읽기 전용으로 연결
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as con:
+                con.row_factory = sqlite3.Row
+                return f(*args, cs=con.cursor(), **kwds)
+        except sqlite3.OperationalError: # uri=True 미지원 환경 대비
+            with sqlite3.connect(db_path) as con:
+                con.row_factory = sqlite3.Row
+                return f(*args, cs=con.cursor(), **kwds)
+    return wrap
+
+
+def parse_jp_names_from_onm(onm_string: str) -> List[str]:
+    """'한국어(일본어), 다른한국어(다른일본어)' 형태의 문자열에서 모든 일본어 이름을 추출합니다."""
+    if not onm_string:
+        return []
+    return re.findall(r'\(([^)]+)\)', onm_string)
+
+
+@require_actors_db_cursor
+def initialize_actors_cache(cs: sqlite3.Cursor = None) -> bool:
+    """배우 DB를 읽어와 메모리에 캐시를 생성합니다."""
+    global ACTORS_DB_CACHE
+    if ACTORS_DB_CACHE is not None:
+        logger.debug("배우 DB 캐시가 이미 초기화되었습니다.")
+        return True
+
+    logger.info("배우 DB를 읽어와 메모리에 캐시를 생성합니다...")
+
+    # 캐시 구조: {'일본어/원어이름': {'kr_name': '한국어이름', 'cn_name': '대표원어', 'onm': '별명들'}}
+    temp_cache = {}
+
+    query = "SELECT inner_name_kr, inner_name_cn, actor_onm FROM actors"
+    all_actors = cs.execute(query).fetchall()
+
+    for actor_record in all_actors:
+        kr_name = actor_record['inner_name_kr'] if 'inner_name_kr' in actor_record.keys() else None
+        cn_name = actor_record['inner_name_cn'] if 'inner_name_cn' in actor_record.keys() else None
+        onm_str = actor_record['actor_onm'] if 'actor_onm' in actor_record.keys() else None
+
+        # 이 배우의 모든 원어 이름을 담을 집합
+        all_jp_names = set()
+
+        if cn_name:
+            all_jp_names.add(cn_name)
+        if onm_str:
+            jp_names_in_onm = parse_jp_names_from_onm(onm_str)
+            all_jp_names.update(jp_names_in_onm)
+
+        # 각 원어 이름을 키로 하여 캐시에 저장
+        for jp_name in all_jp_names:
+            if jp_name not in temp_cache:
+                temp_cache[jp_name] = {
+                    'kr_name': kr_name,
+                    'cn_name': cn_name,
+                    'onm': onm_str
+                }
+
+    ACTORS_DB_CACHE = temp_cache
+    logger.info(f"배우 DB 캐시 생성 완료. 총 {len(all_actors)}명의 배우, {len(temp_cache)}개의 원어 이름 인덱싱됨.")
+    return True
+
+
+def get_actor_info_from_jp_name(jp_name: str) -> Optional[dict]:
+    """메모리에 캐시된 배우 정보에서 주어진 원어 이름과 일치하는 정보를 찾습니다."""
+    global ACTORS_DB_CACHE
+    if ACTORS_DB_CACHE is None:
+        logger.error("배우 DB 캐시가 초기화되지 않았습니다. get_actor_info_from_jp_name을 호출할 수 없습니다.")
+        return None
+
+    if not jp_name:
+        return None
+
+    # 캐시에서 직접 조회 (매우 빠름)
+    actor_info = ACTORS_DB_CACHE.get(jp_name)
+
+    if actor_info:
+        # sqlite3.Row와 유사한 인터페이스를 제공하기 위해 딕셔너리를 반환
+        return {
+            'inner_name_kr': actor_info['kr_name'],
+            'inner_name_cn': actor_info['cn_name'],
+            'actor_onm': actor_info['onm']
+        }
+
+    return None
+
+
+# Plex DB에서 특정 아이템의 배우 정보를 가져오는 함수
+@require_cursor("PLEX_DB", read_only=True)
+def get_actors_for_item_from_plex_db(item_id: int, cs: sqlite3.Cursor = None) -> List[str]:
+    """Plex DB에서 특정 metadata_item_id에 연결된 배우(tag) 목록을 가져옵니다."""
+    query = """
+    SELECT
+        t.tag AS actor_name_kr -- 배우 이름 (한국어 또는 원어)
+    FROM tags t
+    JOIN taggings tg ON t.id = tg.tag_id
+    WHERE tg.metadata_item_id = ? AND t.tag_type = 6
+    """
+    rows = cs.execute(query, (item_id,)).fetchall()
+    # 문자열 리스트를 반환
+    return [row['actor_name_kr'] for row in rows if row and row['actor_name_kr']]
+
+
 def format_numeric_for_search(num_str: str, min_digits: int = 3) -> str:
     """숫자 문자열을 검색에 적합한 형태로 포맷합니다 (최소 3자리, 그 이상은 원본 유지, 후행 알파벳 보존)."""
     if not num_str:
@@ -362,10 +481,10 @@ def compile_parsing_rules():
     for rule_str in raw_rules.get('censored_special_rules', []):
         match = rule_parser.match(rule_str)
         if not match: continue
-        
+
         pattern, format_body = match.groups()
         if '|' not in format_body: continue
-        
+
         label_format, num_format = format_body.split('|', 1)[:2]
         compiled['special'].append({
             'pattern': pattern,
@@ -377,7 +496,7 @@ def compile_parsing_rules():
     for rule_str in raw_rules.get('generic_rules', []):
         match = rule_parser.match(rule_str)
         if not match: continue
-        
+
         pattern, format_body = match.groups()
         if '|' not in format_body: continue
 
@@ -461,7 +580,7 @@ def normalize_pid_for_comparison(pid_alpha_hyphen_padded_num: str) -> Optional[s
     # 2. 숫자 부분 표준화 (Standardization)
     num_part_lower = num_part_raw.lower()
     padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 7)
-    
+
     # 숫자와 후행 알파벳 분리 (예: '012a' -> '012', 'a')
     match = re.match(r"(\d+)([a-z]*)?$", num_part_lower)
     if not match:
@@ -477,11 +596,11 @@ def normalize_pid_for_comparison(pid_alpha_hyphen_padded_num: str) -> Optional[s
     except (ValueError, TypeError):
         logger.warning(f"normalize_pid_for_comparison: 정규식 통과 후에도 '{numeric_digits_str}'를 정수로 변환 실패. zfill만 적용.")
         standardized_num_part = numeric_digits_str.zfill(padding_len)
-        
+
     # 3. 최종 비교 문자열 생성
     # 정규화된 레이블 + 표준화된 숫자 부분 + 후행 알파벳
     final_comparison_pid = normalized_label + standardized_num_part + trailing_alpha
-    
+
     logger.debug(f"normalize_pid_for_comparison: '{pid_alpha_hyphen_padded_num}' (L:'{label_part_raw}', N:'{num_part_raw}') -> '{final_comparison_pid}'")
     return final_comparison_pid
 
@@ -503,7 +622,7 @@ async def get_query_count(base_query_template_for_select: str, params: tuple = N
 
     count_query = f"SELECT COUNT(*) AS count {from_where_part}"
     row = await await_sync(fetch_one, count_query, params)
-    
+
     if row:
         return row.get('count', row.get('COUNT(*)'))
     return -1
@@ -540,7 +659,6 @@ async def _get_matches_api(metadata_id: int, title: str = None, year: int = None
     if is_fix_labels_mode: manual_mode_for_log += " (fix-labels)"
     elif CONFIG.get("MANUAL_SEARCH"): manual_mode_for_log += " (manual-search CLI)"
     else: manual_mode_for_log += " (auto-prioritized)"
-
 
     if title: query_params['title'] = title
     if year: query_params['year'] = str(year)
@@ -587,7 +705,7 @@ async def get_plex_matches(item_row: sqlite3.Row) -> dict:
 
     base_filename = os.path.basename(media_path)
     logger.debug(f"  ID {item_id}: 파일명 기반 검색어 추출 시작 (파일명: '{base_filename}')")
-    
+
     filename_pid_padded = extract_product_id_from_filename(base_filename)
 
     if not filename_pid_padded:
@@ -891,7 +1009,7 @@ def map_scan_path(path: str) -> str:
     """설정에 따라 스캔 경로를 Plex가 인식하는 경로로 변환합니다."""
     if not CONFIG.get("SCAN_PATH_MAPPING_ENABLED"):
         return path
-    
+
     try:
         # 설정 파일의 '소스:타겟' 쌍들을 세미콜론으로 구분하여 여러 개 처리 가능하도록 수정
         mapping_rules = CONFIG.get("SCAN_PATH_MAP", "").split(';')
@@ -906,7 +1024,7 @@ def map_scan_path(path: str) -> str:
                 return mapped_path
     except Exception as e:
         logger.error(f"SCAN_PATH_MAP 설정 처리 중 오류: {e}")
-    
+
     logger.debug(f"일치하는 경로 변환 규칙이 없어 원본 경로 반환: '{path}'")
     return path
 
@@ -1071,7 +1189,7 @@ async def run_scan_mode(args):
                 if current_depth >= scan_depth:
                     del dirnames[:]
                     continue
-                
+
                 if current_depth == scan_depth - 1:
                     for dirname in dirnames:
                         dirs_to_scan.add(os.path.join(dirpath, dirname))
@@ -1421,7 +1539,7 @@ async def run_manual_interactive_rematch_for_item(
                 candidate_name_from_api = cand_obj.get('name', '이름없음')
                 candidate_title_pid_padded_raw = extract_product_id_from_title(candidate_name_from_api, original_file_pid_parts_for_hint)
                 normalized_candidate_pid_for_comparison = normalize_pid_for_comparison(candidate_title_pid_padded_raw)
-                
+
                 candidate_pid_display_search_form = "추출실패"
                 if candidate_title_pid_padded_raw:
                     parts_cand_display = candidate_title_pid_padded_raw.split('-', 1)
@@ -1449,7 +1567,7 @@ async def run_manual_interactive_rematch_for_item(
                         parts_orig_f_disp = current_file_pid_raw.split('-',1)
                         if len(parts_orig_f_disp) == 2: original_file_pid_display_search_form_f = f"{parts_orig_f_disp[0].lower()}-{format_numeric_for_search(parts_orig_f_disp[1], 3).lower()}"
                     pid_match_display_string = f" [후보품번추출실패! 원본:{original_file_pid_display_search_form_f}]"
-                
+
                 print(f"    {i_cand+1}. {candidate_name_from_api[:50]}... "
                     f"(품번: {candidate_pid_display_search_form}{pid_match_display_string}) "
                     f"Score: {cand_obj.get('score',0)}, GUID: {cand_obj.get('guid')}")
@@ -1464,7 +1582,7 @@ async def run_manual_interactive_rematch_for_item(
         if user_choice_input_str == 'q':
             SHUTDOWN_REQUESTED = True
             return False, "GLOBAL_QUIT_REQUESTED_BY_USER"
-        
+
         elif user_choice_input_str in ['n', '']:
             logger.info(f"  ID {item_id}: 사용자가 후보를 선택하지 않아 건너뜁니다.")
             if not CONFIG.get("DRY_RUN"):
@@ -1476,7 +1594,7 @@ async def run_manual_interactive_rematch_for_item(
                 custom_search_term = (await asyncio.get_running_loop().run_in_executor(None, input, "  사용할 검색어를 입력하세요: ")).strip()
             except (EOFError, KeyboardInterrupt):
                 SHUTDOWN_REQUESTED = True; continue
-            
+
             if not custom_search_term:
                 logger.warning("검색어가 입력되지 않았습니다. 다시 시도하세요.")
                 continue
@@ -1485,17 +1603,17 @@ async def run_manual_interactive_rematch_for_item(
             section = await get_section_by_id(original_row_for_matches['library_section_id'])
             agent_to_use = section.get('agent') if section else None
             year_to_use = original_row_for_matches.get('year')
-            
+
             original_manual_config = CONFIG.get("MANUAL_SEARCH", False)
             CONFIG["MANUAL_SEARCH"] = True
             new_matches_data = await _get_matches_api(item_id, custom_search_term, year_to_use, agent_to_use)
             CONFIG["MANUAL_SEARCH"] = original_manual_config
-            
+
             valid_candidates = [
                 c for c in new_matches_data.get('MediaContainer', {}).get('SearchResult', [])
                 if not any(c.get('guid', '').startswith(p) for p in MATCH_CANDIDATE_EXCLUDED_GUID_PREFIXES)
             ]
-            
+
             if not valid_candidates:
                 logger.warning(f"  검색어 '{custom_search_term}'에 대한 결과를 찾을 수 없습니다.")
             continue
@@ -1503,7 +1621,7 @@ async def run_manual_interactive_rematch_for_item(
         elif user_choice_input_str.isdigit() and 0 < int(user_choice_input_str) <= len(valid_candidates):
             final_selected_candidate = valid_candidates[int(user_choice_input_str) - 1]
             break
-        
+
         else:
             logger.warning("잘못된 입력입니다. 목록 내 번호, N, S, 또는 Q를 입력하세요.")
     # --- 루프 끝 ---
@@ -1795,7 +1913,7 @@ async def run_interactive_search_and_rematch_mode(args):
                     except ValueError as ve_num: logger.warning(f"잘못된 번호: '{part_item_str}'. 오류: {ve_num}"); is_current_input_valid = False; break
                 else: logger.warning(f"잘못된 입력 형식: '{part_item_str}'."); is_current_input_valid = False; break
             if not is_current_input_valid: continue
-        
+
         if not selected_indices_from_user_input_actual:
             logger.info("선택된 항목이 없습니다. 다시 입력하거나 'q'로 종료하세요."); continue
 
@@ -2014,7 +2132,7 @@ async def run_interactive_search_and_rematch_mode(args):
             logger.info(f"  - 성공 (품번 일치 또는 원본 품번 없음): {success_count_final}건")
             logger.info(f"  - 성공 (품번 불일치 또는 매칭결과 품번추출실패): {pid_mismatch_count_final}건 (수동 폴백 대상)")
             logger.info(f"  - 실패 (후보 없음 또는 오류): {fail_count_final}건 (수동 폴백 대상)")
-            
+
             seen_fallback_ids = set()
             unique_items_for_manual_fallback = []
             for item_fb_data_orig in items_for_manual_fallback_data:
@@ -2075,7 +2193,7 @@ async def run_interactive_search_and_rematch_mode(args):
                                 )
                                 if rematch_success_fb_run:
                                     processed_items_count_this_mode += 1
-                            
+
                             except asyncio.CancelledError:
                                 logger.warning(f"ID {item_data_fb_manual_run['id']}: 수동 폴백 처리 중 명시적으로 취소됨.")
                                 if not CONFIG.get("DRY_RUN"):
@@ -2227,7 +2345,7 @@ async def run_auto_rematch_mode(args):
             percentage_processed = (items_considered_processed / total_items_to_process_in_queue_initially) * 100 if total_items_to_process_in_queue_initially > 0 else 0
             logger.info(f"\033[36m진행: {items_considered_processed}/{total_items_to_process_in_queue_initially} ({percentage_processed:.1f}%) 처리 시작됨. (큐 잔여: {items_remaining_in_queue})\033[0m")
             last_logged_processed_count = items_considered_processed
-        
+
         try:
             await asyncio.sleep(1) # 1초 간격으로 큐 상태 확인 및 로깅 (조절 가능)
         except asyncio.CancelledError:
@@ -2588,7 +2706,7 @@ async def run_fix_labels_mode(args):
     original_manual_search_config = CONFIG.get("MANUAL_SEARCH", False)
     current_match_limit = CONFIG.get("MATCH_LIMIT", 0)
     processed_items_in_fix_mode = 0
-    
+
     sjva_agent_guid_prefix_val = CONFIG.get("SJVA_AGENT_GUID_PREFIX")
     none_agent_guid_prefix_val = "com.plexapp.agents.none://"
     known_site_codes_for_incomplete_check = ["dmm", "mgs", "javbus", "javdb", "jav321", "1pondo", "heyzo", "caribbean", "10musume", "pacopacomama", "aventertainments", "fc2", "tokyo-hot"]
@@ -2725,7 +2843,7 @@ async def run_fix_labels_mode(args):
             logger.warning("\n입력 중단. 모드를 종료합니다.")
             user_has_quit_interaction_fix = True
             break
-        
+
         if user_input_raw_str_fix == 'q':
             user_has_quit_interaction_fix = True
             break
@@ -2798,11 +2916,11 @@ async def run_fix_labels_mode(args):
             logger.info(f"--- [FIXLABELS] Plex Dance 모드로 {len(items_to_process_this_round_fix)}개 항목 처리 시작 ---")
             for item_data in items_to_process_this_round_fix:
                 if SHUTDOWN_REQUESTED or user_has_quit_interaction_fix: break
-                
+
                 success = await run_plex_dance_for_item(item_data['id'])
                 if success:
                     processed_items_in_fix_mode += 1
-                
+
                 # 다음 아이템 처리 전 딜레이
                 if not SHUTDOWN_REQUESTED and not user_has_quit_interaction_fix:
                     match_interval_s = CONFIG.get("MATCH_INTERVAL", 1)
@@ -2818,7 +2936,7 @@ async def run_fix_labels_mode(args):
             try:
                 for item_data_fix_manual in items_to_process_this_round_fix:
                     if SHUTDOWN_REQUESTED or user_has_quit_interaction_fix: break
-                    
+
                     unmatch_call_ok_fix = await unmatch_plex_item(item_data_fix_manual['id'])
                     if not unmatch_call_ok_fix:
                         logger.error(f"  ID {item_data_fix_manual['id']}: 수동 매칭 전 언매치 실패.")
@@ -2965,7 +3083,7 @@ async def run_fix_labels_mode(args):
             logger.info(f"  - 성공 (품번 일치 또는 원본 품번 없음): {success_count_final_fix}건")
             logger.info(f"  - 성공 (품번 불일치 또는 매칭결과 품번추출실패): {pid_mismatch_count_final_fix}건 (수동 폴백 대상)")
             logger.info(f"  - 실패 (후보 없음 또는 오류): {fail_count_final_fix}건 (수동 폴백 대상)")
-            
+
             seen_fallback_ids_fix = set()
             unique_items_for_manual_fallback_fix = []
             for item_fb_data_orig_fix in items_for_manual_fallback_data_fix:
@@ -2992,7 +3110,7 @@ async def run_fix_labels_mode(args):
                     fallback_choice_input_fix = (await asyncio.get_running_loop().run_in_executor(None, input, fb_prompt_auto_fix)).lower().strip()
                 except EOFError: user_has_quit_interaction_fix = True
                 except Exception as e_fb_input_fix: logger.error(f"폴백 선택 입력 오류: {e_fb_input_fix}"); user_has_quit_interaction_fix = True
-                
+
                 if SHUTDOWN_REQUESTED or user_has_quit_interaction_fix: break
 
                 if fallback_choice_input_fix == 'y':
@@ -3026,7 +3144,7 @@ async def run_fix_labels_mode(args):
                                 )
                                 if status_msg_fb_fix == "GLOBAL_QUIT_REQUESTED_BY_USER": user_has_quit_interaction_fix = True
                                 if rematch_success_fb_run_fix: processed_items_in_fix_mode += 1
-                            
+
                             except asyncio.CancelledError:
                                 logger.warning(f"ID {item_data_fb_manual_run_fix['id']}: 수동 폴백 처리 중 명시적으로 취소됨.")
                                 if not CONFIG.get("DRY_RUN"): await await_sync(record_completed_task, item_data_fb_manual_run_fix['id'], status="CANCELLED_IN_FIXLABELS_FALLBACK")
@@ -3401,7 +3519,7 @@ async def run_move_no_meta_mode(args):
         if not user_input: continue
 
         selected_indices = set()
-        # ... (run_no_poster_mode 와 동일한 인덱스 파싱 로직)
+
         is_input_valid = True
         if user_input == 'all':
             selected_indices.update(range(len(candidate_rows)))
@@ -3483,12 +3601,17 @@ async def run_force_complete_mode(args):
     logger.info("이 기능은 사용자가 Plex UI에서 직접 수정한 항목을 스크립트가 더 이상 건드리지 않도록 할 때 유용합니다.")
 
     await await_sync(create_table_if_not_exists)
-    
+
     processed_count = 0
 
     while not SHUTDOWN_REQUESTED:
         # 1. 대상 아이템 식별
-        query = "SELECT id, title, guid, title_sort FROM metadata_items WHERE library_section_id = ?"
+        query = """
+        SELECT id, title, guid, title_sort 
+        FROM metadata_items 
+        WHERE library_section_id = ? 
+          AND (guid IS NULL OR guid NOT LIKE 'collection://%')
+        """
         all_items_in_lib = await await_sync(fetch_all, query, (str(lib_id),))
 
         items_to_review = []
@@ -3583,6 +3706,233 @@ async def run_force_complete_mode(args):
         await asyncio.sleep(1)
 
     logger.info(f"--force-complete 모드 완료. 총 {processed_count}개 아이템 처리됨.")
+
+
+async def run_update_actors_mode(args):
+    """
+    Plex에 등록된 배우 이름이 외부 배우DB의 원어 이름과 일치하는 경우를 찾아
+    한국어 이름으로 업데이트하도록 제안합니다.
+    """
+    global CONFIG, SHUTDOWN_REQUESTED, ACTORS_DB_CACHE
+
+    lib_id = CONFIG.get("ID")
+    if not lib_id:
+        logger.error("--update-actors 모드에는 --section-id가 필수입니다.")
+        return
+    if not CONFIG.get("ACTORS_DB_PATH") or not os.path.exists(CONFIG.get("ACTORS_DB_PATH")):
+        logger.error("ACTORS_DB_PATH가 설정되지 않았거나 파일이 존재하지 않습니다.")
+        return
+
+    # 모드 시작 시 캐시 초기화
+    if not await await_sync(initialize_actors_cache):
+        logger.error("배우 DB 캐시 초기화에 실패했습니다. --update-actors 모드를 종료합니다.")
+        return
+
+    logger.info(f"--update-actors 모드 시작. 대상 라이브러리 ID: {lib_id}")
+
+    processed_count = 0
+    match_limit = CONFIG.get("MATCH_LIMIT", 0)
+    items_to_update = []
+
+    while not SHUTDOWN_REQUESTED:
+        if match_limit > 0 and processed_count >= match_limit:
+            logger.info(f"--match-limit ({match_limit}개) 도달. 모드를 종료합니다.")
+            break
+
+        if not items_to_update:
+            logger.info("\n업데이트가 필요한 아이템을 검색합니다... (라이브러리 크기에 따라 시간이 걸릴 수 있습니다)")
+            query = "SELECT id, title, title_sort FROM metadata_items WHERE library_section_id = ? AND metadata_type = 1"
+            all_items = await await_sync(fetch_all, query, (str(lib_id),))
+
+            items_to_update_temp = []
+            total_items = len(all_items)
+            for i, item in enumerate(all_items):
+                if SHUTDOWN_REQUESTED: break
+
+                if (i > 0 and (i + 1) % 100 == 0) or i == total_items - 1:
+                    logger.info(f"  ... {i+1}/{total_items}개 아이템 검사 완료")
+
+                # plex_actors는 이제 ['배우1', '배우2'] 형태의 문자열 리스트
+                plex_actors = await await_sync(get_actors_for_item_from_plex_db, item['id'])
+                if not plex_actors: continue
+
+                needs_update = False
+                update_reasons = set()
+
+                for plex_actor_name in plex_actors:
+                    # Plex에 등록된 배우 이름(plex_actor_name)이 배우 DB의 "원어 이름" 중에 있는지 검색
+                    actor_db_info = get_actor_info_from_jp_name(plex_actor_name)
+
+                    # 찾았다면, 이 이름은 원어 이름이라는 뜻.
+                    if actor_db_info:
+                        db_kr_name = actor_db_info.get('inner_name_kr')
+
+                        # DB에 등록된 한국어 이름이 있고, 그 이름이 현재 Plex에 등록된 원어 이름과 다르다면 업데이트 대상.
+                        if db_kr_name and db_kr_name != plex_actor_name:
+                            needs_update = True
+                            update_reasons.add(f"'{plex_actor_name}' -> '{db_kr_name}'")
+
+                if needs_update:
+                    items_to_update_temp.append({
+                        'id': item['id'],
+                        'title': item['title'],
+                        'reason': ", ".join(sorted(list(update_reasons)))
+                    })
+
+            items_to_update = items_to_update_temp
+
+            if SHUTDOWN_REQUESTED: break
+            if not items_to_update:
+                logger.info("모든 아이템의 배우 정보가 최신입니다. 모드를 종료합니다.")
+                break
+
+            try:
+                items_to_update.sort(key=lambda x: natural_sort_key(x.get('title') or ''))
+            except Exception: pass
+
+        # --- 인터랙티브 루프 ---
+        while not SHUTDOWN_REQUESTED:
+            print(f"\n--- 배우 정보 업데이트 대상 목록 ({len(items_to_update)}개) ---")
+            header_format = "{idx:<5s} | {id:<7s} | {title:<60s} | {reason}"
+            print(header_format.format(idx="No.", id="ID", title="Title", reason="Update Details"))
+            print("-" * 130)
+            for i, item in enumerate(items_to_update):
+                title_disp = item['title'][:58] + '..' if len(item['title']) > 60 else item['title']
+                reason_disp = item['reason'][:45] + '...' if len(item['reason']) > 45 else item['reason']
+                print(header_format.format(idx=str(i + 1), id=str(item['id']), title=title_disp, reason=reason_disp))
+            print("-" * 130)
+
+            user_input = ""
+            try:
+                prompt = "\n새로고침할 항목 번호(들) (all, 목록 새로고침 R, 종료 Q): "
+                user_input = (await asyncio.get_running_loop().run_in_executor(None, input, prompt)).lower().strip()
+            except (EOFError, KeyboardInterrupt): user_input = 'q'
+
+            if user_input == 'q':
+                SHUTDOWN_REQUESTED = True; break
+            if user_input == 'r':
+                logger.info("목록을 새로고침합니다...")
+                items_to_update = []
+                break
+            if not user_input: continue
+
+            selected_indices = set()
+            is_input_valid = True
+            if user_input == 'all':
+                selected_indices.update(range(len(items_to_update)))
+            else:
+                parts = user_input.split(',')
+                for part in parts:
+                    part = part.strip()
+                    if '-' in part:
+                        try:
+                            start, end = map(int, part.split('-'))
+                            if not (0 < start <= end <= len(items_to_update)): raise ValueError
+                            selected_indices.update(range(start - 1, end))
+                        except ValueError: is_input_valid = False; break
+                    elif part.isdigit():
+                        try:
+                            num = int(part)
+                            if not (0 < num <= len(items_to_update)): raise ValueError
+                            selected_indices.add(num - 1)
+                        except ValueError: is_input_valid = False; break
+                    else: is_input_valid = False; break
+
+            if not is_input_valid:
+                logger.warning("잘못된 입력입니다. 다시 시도해주세요."); continue
+
+            items_to_process = [items_to_update[i] for i in sorted(list(selected_indices))]
+            if not items_to_process: continue
+
+            logger.info(f"--- 선택된 {len(items_to_process)}개 항목에 대해 언매치를 통한 강제 메타데이터 갱신을 시작합니다 ---")
+
+            items_processed_in_this_round_indices = []
+
+            for item_data in items_to_process:
+                if SHUTDOWN_REQUESTED: break
+                if match_limit > 0 and processed_count >= match_limit: break
+
+                success = await unmatch_and_verify_rematch(item_data['id'])
+
+                if success:
+                    processed_count += 1
+                    # 성공한 항목의 원래 목록에서의 인덱스를 찾음
+                    original_index = next((i for i, original_item in enumerate(items_to_update) if original_item['id'] == item_data['id']), None)
+                    if original_index is not None:
+                        items_processed_in_this_round_indices.append(original_index)
+
+                if not SHUTDOWN_REQUESTED:
+                    await asyncio.sleep(CONFIG.get("MATCH_INTERVAL", 1))
+
+            # 처리된 항목들을 메인 목록에서 제거
+            for index in sorted(items_processed_in_this_round_indices, reverse=True):
+                del items_to_update[index]
+
+            if user_input == 'all':
+                logger.info("'all' 옵션 처리가 완료되었습니다. 목록을 새로고침합니다.")
+                items_to_update = []
+                break
+
+            if not items_to_update:
+                logger.info("목록의 모든 항목이 처리되었습니다. 새로고침합니다.")
+                break
+
+    logger.info(f"--update-actors 모드 완료. 총 {processed_count}개 아이템 새로고침 요청됨.")
+
+
+async def unmatch_and_verify_rematch(item_id: int) -> bool:
+    """
+    아이템을 언매치하고, Plex가 자동으로 다시 매칭하여 메타데이터를
+    완전히 업데이트할 때까지 기다리고 확인합니다.
+    """
+    logger.info(f"  ID {item_id}: 언매치를 통한 강제 메타데이터 갱신 시작...")
+    
+    # 1. 언매치 실행
+    if not await unmatch_plex_item(item_id):
+        logger.error(f"  ID {item_id}: 언매치 요청 실패. 갱신을 중단합니다.")
+        return False
+
+    if SHUTDOWN_REQUESTED: return False
+    
+    # 2. 자동 재매칭 후 업데이트 확인
+    logger.info(f"  ID {item_id}: 언매치 완료. Plex의 자동 재매칭을 기다립니다...")
+    start_timestamp = int(datetime.now().timestamp())
+    
+    rematch_confirmed = False
+    for i in range(CONFIG.get("CHECK_COUNT", 10)):
+        if SHUTDOWN_REQUESTED: break
+        logger.debug(f"  ID {item_id}: 재매칭 확인 중... ({i+1}/{CONFIG.get('CHECK_COUNT', 10)})")
+        if await check_plex_update(item_id, start_timestamp):
+            rematch_confirmed = True
+            break
+        await asyncio.sleep(CONFIG.get("CHECK_INTERVAL", 4))
+
+    if rematch_confirmed:
+        logger.info(f"  ID {item_id}: 재매칭 및 메타데이터 업데이트를 성공적으로 확인했습니다.")
+        return True
+
+    if SHUTDOWN_REQUESTED: return False
+
+    # 3. 자동 재매칭 미확인 시, 수동 새로고침 시도 (기존 rematch_plex_item 로직 재활용)
+    logger.warning(f"  ID {item_id}: 자동 재매칭이 감지되지 않음. 강제 새로고침을 시도합니다...")
+    if not await refresh_plex_item_metadata(item_id):
+        logger.error(f"  ID {item_id}: 강제 새로고침 요청 실패.")
+        return False
+
+    logger.info(f"  ID {item_id}: 새로고침 요청 후 다시 업데이트를 확인합니다...")
+    refresh_timestamp = int(datetime.now().timestamp())
+    refresh_check_count = max(3, CONFIG.get("CHECK_COUNT", 10) // 2)
+
+    for i in range(refresh_check_count):
+        if SHUTDOWN_REQUESTED: break
+        logger.debug(f"  ID {item_id}: 새로고침 후 확인 중... ({i+1}/{refresh_check_count})")
+        if await check_plex_update(item_id, refresh_timestamp):
+            logger.info(f"  ID {item_id}: 강제 새로고침 후 메타데이터 업데이트를 성공적으로 확인했습니다.")
+            return True
+        await asyncio.sleep(max(2, CONFIG.get("CHECK_INTERVAL", 4)))
+
+    logger.error(f"  ID {item_id}: 모든 시도 후에도 메타데이터 업데이트를 최종 확인하지 못했습니다.")
+    return False
 
 
 async def run_find_dupes_mode(args):
@@ -3796,7 +4146,7 @@ async def run_find_dupes_mode(args):
                         item_guid_disp = item_guid_disp.replace(base_sjva_agent_prefix, "", 1)
 
                     if '?' in item_guid_disp:
-                        display_guid = item_guid_disp.split('?', 1)[0]
+                        item_guid_disp = item_guid_disp.split('?', 1)[0]
 
                     item_guid_disp = item_guid_disp[:28] + '..' if len(item_guid_disp) > 30 else item_guid_disp
                     print(f"    {i+1}. ID: {item_data['id']:<7} | GUID: {item_guid_disp:<30} | File: {os.path.basename(item_data['file_path'])}")
@@ -3884,6 +4234,7 @@ async def main():
     rematch_group.add_argument("--match-interval", type=int, help=f"각 아이템 처리 후 대기 시간 (초) (기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['MATCH_INTERVAL']})")
     rematch_group.add_argument("--move-no-meta", action="store_true", help="메타데이터가 없는 아이템을 지정된 경로로 이동하고 라이브러리에서 제거합니다.")
     rematch_group.add_argument("--force-complete", action="store_true", help="미완료 리스트에서 선택 항목을 '완료' 상태로 강제 처리합니다.")
+    rematch_group.add_argument("--update-actors", action="store_true", help="외부 배우 DB와 비교하여 업데이트 된 배우정보로 새로고침합니다.")
 
     scan_group = parser.add_argument_group('라이브러리 스캔 옵션')
     scan_group.add_argument("--scan-full", action="store_true", help="섹션 경로를 정해진 depth로 분할하여 순차적으로 스캔합니다.")
@@ -4057,6 +4408,10 @@ async def main():
 
         if CONFIG.get("FIND_DUPES"):
             await run_find_dupes_mode(args)
+            return
+
+        if CONFIG.get("UPDATE_ACTORS"):
+            await run_update_actors_mode(args)
             return
 
         if CONFIG.get("SCAN_FULL") or CONFIG.get("SCAN_PATH"):
