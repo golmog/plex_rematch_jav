@@ -427,6 +427,49 @@ def get_actors_for_item_from_plex_db(item_id: int, cs: sqlite3.Cursor = None) ->
     return [row['actor_name_kr'] for row in rows if row and row['actor_name_kr']]
 
 
+@require_cursor("COMPLETION_DB")
+def setup_scan_session_table(cs: sqlite3.Cursor = None):
+    """단일 레코드 방식의 scan_sessions 테이블을 생성합니다."""
+    cs.execute("""
+    CREATE TABLE IF NOT EXISTS scan_sessions (
+        library_section_id INTEGER PRIMARY KEY,
+        pending_paths TEXT NOT NULL,
+        total_paths INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+
+@require_cursor("COMPLETION_DB", read_only=True)
+def get_scan_session(library_id: int, cs: sqlite3.Cursor = None) -> Optional[dict]:
+    """진행 중인 스캔 세션 정보를 가져옵니다."""
+    import json
+    row = cs.execute("SELECT pending_paths, total_paths FROM scan_sessions WHERE library_section_id = ?", (library_id,)).fetchone()
+    if row:
+        return {
+            "pending_paths": json.loads(row["pending_paths"]),
+            "total_paths": row["total_paths"]
+        }
+    return None
+
+
+@require_cursor("COMPLETION_DB")
+def update_scan_session(library_id: int, pending_paths: List[str], total_paths: int, cs: sqlite3.Cursor = None):
+    """스캔 세션 정보를 생성하거나 업데이트합니다."""
+    import json
+    pending_paths_json = json.dumps(pending_paths)
+    cs.execute(
+        "INSERT OR REPLACE INTO scan_sessions (library_section_id, pending_paths, total_paths) VALUES (?, ?, ?)",
+        (library_id, pending_paths_json, total_paths)
+    )
+
+
+@require_cursor("COMPLETION_DB")
+def clear_scan_session(library_id: int, cs: sqlite3.Cursor = None):
+    """스캔 세션을 삭제합니다."""
+    cs.execute("DELETE FROM scan_sessions WHERE library_section_id = ?", (library_id,))
+
+
 def format_numeric_for_search(num_str: str, min_digits: int = 3) -> str:
     """숫자 문자열을 검색에 적합한 형태로 포맷합니다 (최소 3자리, 그 이상은 원본 유지, 후행 알파벳 보존)."""
     if not num_str:
@@ -1086,7 +1129,6 @@ async def run_scan_mode(args):
     try:
         if PLEX_SERVER_INSTANCE is None:
             PLEX_SERVER_INSTANCE = PlexServer(CONFIG["PLEX_URL"], CONFIG["PLEX_TOKEN"])
-
         library = await await_sync(PLEX_SERVER_INSTANCE.library.sectionByID, section_id)
     except PlexApiNotFound:
         logger.error(f"Plex에서 섹션 ID {section_id}를 찾을 수 없습니다.")
@@ -1095,203 +1137,218 @@ async def run_scan_mode(args):
         logger.error(f"Plex 서버 연결 또는 섹션 조회 중 오류 발생: {e}")
         return
 
-    # --scan-path 옵션 처리 (특정 경로만 스캔)
+    # --scan-path 옵션 처리 (단일 경로 스캔)
     scan_path_specific = CONFIG.get("SCAN_PATH")
     if scan_path_specific:
         mapped_path = map_scan_path(scan_path_specific)
 
-        # --- '--scan-no-wait' 옵션에 따른 분기 처리 ---
         if CONFIG.get("SCAN_NO_WAIT"):
-            # 즉시 스캔 요청 후 종료 (Fire-and-Forget)
             logger.info(f"즉시 스캔 요청 (--scan-no-wait): '{mapped_path}'")
             try:
                 await await_sync(library.update, path=mapped_path)
                 logger.info(f"경로 '{mapped_path}'에 대한 스캔 요청을 성공적으로 보냈습니다. 스크립트를 종료합니다.")
             except Exception as e:
                 logger.error(f"즉시 스캔 요청 중 오류 발생: {e}")
-            return # 즉시 종료
+            return
         else:
-            # 유휴 상태 확인 후, 스캔 완료까지 대기
             logger.info(f"지정된 단일 경로 스캔 시작 (완료까지 대기): '{mapped_path}' (원본: '{scan_path_specific}')")
-
-            # 1. 스캔 전 유휴 상태 확인
             logger.info("스캔 시작 전 Plex 유휴 상태를 확인합니다...")
-            while True:
-                if SHUTDOWN_REQUESTED: break
-                active_tasks = await get_plex_library_activities(library)
-                if not active_tasks:
-                    logger.debug("Plex가 유휴 상태입니다. 스캔을 진행합니다."); break
-                for task in active_tasks:
-                    progress_val = getattr(task, 'progress', 0)
-                    details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
-                    details_str = f" - {', '.join(details)}" if details else ""
-                    logger.info(f"Plex 활동 대기 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
-                logger.info("...Plex가 이전 작업을 완료할 때까지 15초 대기합니다...")
-                try: await asyncio.sleep(15)
-                except asyncio.CancelledError: SHUTDOWN_REQUESTED = True; break
+            while not SHUTDOWN_REQUESTED:
+                try:
+                    active_tasks = await get_plex_library_activities(library)
+                    if not active_tasks:
+                        logger.debug("Plex가 유휴 상태입니다. 스캔을 진행합니다.")
+                        break
+                    for task in active_tasks:
+                        progress_val = getattr(task, 'progress', 0)
+                        details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
+                        details_str = f" - {', '.join(details)}" if details else ""
+                        logger.info(f"Plex 활동 대기 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                    logger.info("...Plex가 이전 작업을 완료할 때까지 15초 대기합니다...")
+                    await asyncio.sleep(15)
+                except Exception as e:
+                    logger.error(f"Plex 상태 확인 중 오류: {e}. 30초 후 재시도합니다.")
+                    await asyncio.sleep(30)
 
             if SHUTDOWN_REQUESTED: return
 
-            # 2. 스캔 요청
             try:
                 await await_sync(library.update, path=mapped_path)
-                logger.info(f"경로 스캔 요청 완료: '{mapped_path}'. Plex가 백그라운드에서 처리합니다.")
-                logger.debug("스캔 요청 후 5초 대기 (Plex 활동 시작 대기)...")
-                await asyncio.sleep(5)
+                logger.info(f"경로 스캔 요청 완료: '{mapped_path}'.")
             except Exception as e:
                 logger.error(f"경로 '{mapped_path}' 스캔 요청 중 오류 발생: {e}")
                 return
 
-            # 3. 스캔 완료 대기
             logger.info(f"'{mapped_path}' 스캔이 완료될 때까지 대기합니다...")
-            while True:
-                if SHUTDOWN_REQUESTED: break
-                active_tasks = await get_plex_library_activities(library)
-                if not active_tasks: break
-                for task in active_tasks:
-                    progress_val = getattr(task, 'progress', 0)
-                    details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
-                    details_str = f" - {', '.join(details)}" if details else ""
-                    logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
-                try: await asyncio.sleep(15)
-                except asyncio.CancelledError: SHUTDOWN_REQUESTED = True; break
+            while not SHUTDOWN_REQUESTED:
+                try:
+                    active_tasks = await get_plex_library_activities(library)
+                    if not active_tasks: break
+                    for task in active_tasks:
+                        progress_val = getattr(task, 'progress', 0)
+                        details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
+                        details_str = f" - {', '.join(details)}" if details else ""
+                        logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                    await asyncio.sleep(15)
+                except Exception as e:
+                    logger.error(f"스캔 진행 상태 확인 중 오류: {e}. 30초 후 재시도합니다.")
+                    await asyncio.sleep(30)
 
             if not SHUTDOWN_REQUESTED:
                 logger.info(f"경로 '{mapped_path}' 스캔이 완료되었습니다.")
         return
 
-    # --scan-full 옵션 처리 (분할 스캔)
+    # --scan-full 옵션 처리 (분할 스캔 - 세션 기반)
     if CONFIG.get("SCAN_FULL"):
-        logger.info(f"섹션 '{library.title}' (ID: {section_id}) 전체 분할 스캔을 시작합니다.")
+        await await_sync(setup_scan_session_table)
 
-        root_paths = await await_sync(get_plex_library_paths, section_id)
-        if not root_paths:
-            logger.error(f"DB에서 섹션 ID {section_id}에 등록된 경로를 찾을 수 없습니다.")
-            return
+        session = await await_sync(get_scan_session, section_id)
+        scan_list = []
+        total_paths = 0
+        user_chose_to_continue = False
 
-        scan_depth = CONFIG.get("SCAN_DEPTH", 2)
-        dirs_to_scan = set()
+        if session and session.get('pending_paths'):
+            pending_count = len(session['pending_paths'])
+            total_count = session['total_paths']
+            logger.warning(f"이전에 완료되지 않은 스캔 세션이 있습니다. ({pending_count}/{total_count} 경로 남음)")
 
-        logger.info(f"등록된 경로들을 depth {scan_depth} 기준으로 분석합니다...")
-        for root_path in root_paths:
-            if not os.path.isdir(root_path):
-                logger.warning(f"등록된 경로 '{root_path}'를 찾을 수 없거나 디렉터리가 아닙니다. 건너뜀.")
-                continue
+            while not SHUTDOWN_REQUESTED:
+                try:
+                    prompt_msg = "계속 [I]어서하시겠습니까, [S]새로 시작하시겠습니까, 아니면 [Q]종료하시겠습니까? "
+                    choice = await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg)
+                    choice = choice.lower().strip()
+                except (EOFError, KeyboardInterrupt):
+                    SHUTDOWN_REQUESTED = True
+                    break
 
-            if scan_depth == 0:
-                dirs_to_scan.add(root_path)
-                continue
+                if choice == 'i':
+                    scan_list = session['pending_paths']
+                    total_paths = session['total_paths']
+                    user_chose_to_continue = True
+                    logger.info("이전 세션에 이어서 스캔을 계속합니다.")
+                    break
+                elif choice == 's':
+                    # scan_list를 비워두면 아래에서 새로 생성됨
+                    break
+                elif choice == 'q':
+                    logger.info("사용자 요청으로 스캔을 종료합니다.")
+                    return
+                else:
+                    print("잘못된 입력입니다. I, S, Q 중 하나를 입력하세요.")
 
-            for dirpath, dirnames, _ in os.walk(root_path, topdown=True):
-                relative_path = os.path.relpath(dirpath, root_path)
-                current_depth = 0 if relative_path == '.' else len(relative_path.split(os.sep))
+        if SHUTDOWN_REQUESTED: return
 
-                if current_depth >= scan_depth:
-                    del dirnames[:]
+        if not user_chose_to_continue:
+            logger.info("새로운 스캔 세션을 위해 폴더 목록을 생성합니다...")
+            root_paths = await await_sync(get_plex_library_paths, section_id)
+            if not root_paths:
+                logger.error(f"DB에서 섹션 ID {section_id}에 등록된 경로를 찾을 수 없습니다."); return
+
+            scan_depth = int(CONFIG.get("SCAN_DEPTH", 2))
+            dirs_to_scan = set()
+            for root_path in root_paths:
+                if not os.path.isdir(root_path):
+                    logger.warning(f"등록된 경로 '{root_path}'를 찾을 수 없거나 디렉터리가 아닙니다. 건너뜁니다.")
                     continue
+                if scan_depth == 0:
+                    dirs_to_scan.add(root_path); continue
 
-                if current_depth == scan_depth - 1:
-                    for dirname in dirnames:
-                        dirs_to_scan.add(os.path.join(dirpath, dirname))
-                    del dirnames[:]
+                for dirpath, dirnames, _ in os.walk(root_path, topdown=True):
+                    relative_path = os.path.relpath(dirpath, root_path)
+                    current_depth = 0 if relative_path == '.' else len(relative_path.split(os.sep))
+                    if current_depth >= scan_depth:
+                        del dirnames[:]; continue
+                    if current_depth == scan_depth - 1:
+                        for dirname in dirnames:
+                            dirs_to_scan.add(os.path.join(dirpath, dirname))
+                        del dirnames[:]
 
-        if not dirs_to_scan:
-            logger.warning(f"Depth {scan_depth}에서 스캔할 하위 디렉터리를 찾지 못했습니다. 루트 경로를 직접 스캔합니다.")
-            dirs_to_scan.update(root_paths)
+            if not dirs_to_scan:
+                logger.warning(f"Depth {scan_depth}에서 스캔할 하위 디렉터리를 찾지 못했습니다. 루트 경로를 직접 스캔합니다.")
+                dirs_to_scan.update(root_paths)
 
-        sorted_scan_list = sorted(list(dirs_to_scan), key=natural_sort_key)
-        total_dirs = len(sorted_scan_list)
-        logger.info(f"총 {total_dirs}개의 디렉터리를 순차적으로 스캔합니다.")
+            scan_list = sorted(list(dirs_to_scan), key=natural_sort_key)
+            total_paths = len(scan_list)
+            await await_sync(update_scan_session, section_id, scan_list, total_paths)
+            logger.info(f"새로운 스캔 세션을 시작합니다. 총 {total_paths}개 경로.")
 
-        for i, path_to_scan in enumerate(sorted_scan_list):
+        completed_in_session = total_paths - len(scan_list)
+        session_ended = False
+
+        for i, path_to_scan in enumerate(scan_list):
             if SHUTDOWN_REQUESTED:
-                logger.warning("사용자 요청으로 스캔이 중단되었습니다.")
+                logger.warning("사용자 요청으로 스캔이 중단되었습니다. 진행 상황이 저장되었습니다.")
                 break
 
-            # 1. 다음 스캔 '전'에 Plex가 유휴 상태인지 확인
-            logger.debug(f"[{i+1}/{total_dirs}] 다음 스캔 전 Plex 상태 확인...")
-            while True:
-                if SHUTDOWN_REQUESTED: break
+            current_progress = completed_in_session + i + 1
 
-                active_tasks = await get_plex_library_activities(library)
-                if not active_tasks:
-                    logger.debug("Plex가 유휴 상태입니다. 다음 스캔을 진행합니다.")
-                    break
+            # 1. Plex가 유휴 상태가 될 때까지 무한 대기
+            logger.info(f"[{current_progress}/{total_paths}] 다음 스캔 전 Plex 유휴 상태를 기다립니다...")
+            while not SHUTDOWN_REQUESTED:
+                try:
+                    active_tasks = await get_plex_library_activities(library)
+                    if not active_tasks:
+                        logger.debug("Plex 유휴 상태 확인. 스캔을 진행합니다.")
+                        break
 
-                # 활동이 있을 경우, 상세 내용을 로그로 남깁니다.
-                for task in active_tasks:
+                    task = active_tasks[0]
                     progress_val = getattr(task, 'progress', 0)
-                    # 상세 정보를 담을 리스트
-                    details = []
-                    # subtitle 속성이 존재하고 비어있지 않으면 추가
-                    subtitle = getattr(task, 'subtitle', None)
-                    if subtitle:
-                        details.append(subtitle)
-
-                    # context 속성이 존재하고 비어있지 않으면 추가
-                    context = getattr(task, 'context', None)
-                    if context:
-                        details.append(context)
-
-                    # details 리스트에 내용이 있으면 " - " 와 함께 문자열로 만듦
+                    details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
                     details_str = f" - {', '.join(details)}" if details else ""
-
-                    logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
-
-                logger.info("...Plex가 이전 작업을 완료할 때까지 15초 대기합니다...")
-                try:
+                    logger.info(f"...Plex 활동 대기 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
                     await asyncio.sleep(15)
-                except asyncio.CancelledError:
-                    SHUTDOWN_REQUESTED = True
-                    break
+                except Exception as e:
+                    logger.error(f"Plex 상태 확인 중 오류 발생: {e}. 30초 후 재시도합니다.")
+                    await asyncio.sleep(30)
 
             if SHUTDOWN_REQUESTED: break
 
-            # 2. 스캔 요청 보내기
+            # 2. 스캔 요청 (오류 시 무한 재시도)
             mapped_path_to_scan = map_scan_path(path_to_scan)
-            logger.info(f"[{i+1}/{total_dirs}] 경로 스캔 요청: '{mapped_path_to_scan}'")
-            try:
-                await await_sync(library.update, path=mapped_path_to_scan)
-                logger.debug("스캔 요청 후 5초 대기 (Plex 활동 시작 대기)...")
-                await asyncio.sleep(5) 
-            except Exception as e:
-                logger.error(f"'{mapped_path_to_scan}' 스캔 요청 중 오류 발생: {e}")
-                continue
-
-            # 3. 방금 보낸 스캔 요청이 '끝날 때까지' 대기
-            logger.info(f"'{mapped_path_to_scan}' 스캔이 완료될 때까지 대기합니다...")
-            retries = 0
-
-            while True:
-                if SHUTDOWN_REQUESTED: break
-
-                active_tasks = await get_plex_library_activities(library)
-                if not active_tasks:
-                    break
-
-                for task in active_tasks:
-                    progress_val = getattr(task, 'progress', 0)
-                    subtitle_val = getattr(task, 'subtitle', '')
-                    progress_str = f" ({progress_val:.0f}%)"
-                    subtitle_str = f" - {subtitle_val}" if subtitle_val else ""
-                    logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{subtitle_str}{progress_str}")
-
+            while not SHUTDOWN_REQUESTED:
                 try:
-                    await asyncio.sleep(15)
-                except asyncio.CancelledError:
-                    SHUTDOWN_REQUESTED = True
+                    logger.info(f"[{current_progress}/{total_paths}] 경로 스캔 요청: '{mapped_path_to_scan}'")
+                    await await_sync(library.update, path=mapped_path_to_scan)
+                    await asyncio.sleep(5)
                     break
-
-                retries += 1
-                if retries > 120: # 30분 이상 걸리면 경고
-                    logger.warning(f"경로 '{mapped_path_to_scan}' 스캔이 30분 이상 소요되고 있습니다. 계속 대기합니다...")
+                except Exception as e:
+                    logger.error(f"'{mapped_path_to_scan}' 스캔 요청 중 오류 발생: {e}. 30초 후 재시도합니다.")
+                    await asyncio.sleep(30)
 
             if SHUTDOWN_REQUESTED: break
 
-            logger.info(f"[{i+1}/{total_dirs}] 경로 '{mapped_path_to_scan}' 스캔 요청 완료.")
+            # 3. 스캔 완료 대기 (오류 시 무한 재시도)
+            logger.info(f"'{mapped_path_to_scan}' 스캔 완료를 기다립니다...")
+            while not SHUTDOWN_REQUESTED:
+                try:
+                    active_tasks = await get_plex_library_activities(library)
+                    if not active_tasks:
+                        break
+                    task = active_tasks[0]
+                    progress_val = getattr(task, 'progress', 0)
+                    details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
+                    details_str = f" - {', '.join(details)}" if details else ""
+                    logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                    await asyncio.sleep(15)
+                except Exception as e:
+                    logger.error(f"스캔 진행 상태 확인 중 오류 발생: {e}. 30초 후 재시도합니다.")
+                    await asyncio.sleep(30)
 
-        if not SHUTDOWN_REQUESTED:
-            logger.info("모든 분할 스캔 요청 및 처리가 완료되었습니다.")
+            if SHUTDOWN_REQUESTED: break
+
+            # 4. DB에 진행 상황 업데이트
+            remaining_paths = scan_list[i+1:]
+            await await_sync(update_scan_session, section_id, remaining_paths, total_paths)
+            logger.info(f"[{current_progress}/{total_paths}] 경로 '{mapped_path_to_scan}' 스캔 완료. 진행 상황 저장됨.")
+
+            # 마지막 항목이었는지 확인
+            if not remaining_paths:
+                session_ended = True
+
+        # 루프가 정상적으로 모두 끝나면 세션 정리
+        if not SHUTDOWN_REQUESTED and session_ended:
+            logger.info("모든 분할 스캔이 완료되었습니다. 세션을 정리합니다.")
+            await await_sync(clear_scan_session, section_id)
 
 
 async def process_single_item_for_auto_rematch(item_row: sqlite3.Row, worker_name_for_log: str) -> bool:
