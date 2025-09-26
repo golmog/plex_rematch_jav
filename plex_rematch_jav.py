@@ -81,8 +81,8 @@ FALLBACK_DEFAULT_CONFIG = {
     "JAV_PARSING_RULES": {
         'generic_rules': [
             r'.*?\d*([a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
-            r'.*?\b([0-9a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
             r'.*?\d*([a-z]+)-?(\d+)(?=[^\d]|\b) => {0}|{1}',
+            r'.*?\b([0-9a-z]*[a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
             r'.*?\b([0-9a-z]*[a-z]+)-?(\d+)(?=[^\d]|\b) => {0}|{1}'
         ],
         'censored_special_rules': [
