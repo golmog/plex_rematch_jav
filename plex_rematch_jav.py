@@ -2737,10 +2737,11 @@ async def run_fix_labels_mode(args):
     lib_id_val = CONFIG.get("ID")
     logger.info(f"--fix-labels 모드 시작. 대상 라이브러리 ID: {lib_id_val}")
     logger.warning("이 모드는 각 아이템에 대해 사용자 확인을 거치며, 선택 시 기본적으로 강제 언매치 및 로컬 JSON 파일 삭제 후 재매칭을 시도합니다.")
+    sjva_prefix_for_log = CONFIG.get("SJVA_AGENT_GUID_PREFIX")
     logger.info("다음 조건 중 하나 이상에 해당하는 아이템을 검토합니다:\n"
                 "  1. GUID가 없거나, 'local://', 'com.plexapp.agents.none://' 등으로 시작하여 매칭이 완료되지 않은 아이템.\n"
                 "  2. 제목 형식이 비정상적이어서 메타데이터가 완전히 적용되지 않은 것으로 추정되는 아이템 (예: '품번 / 정보 / 사이트코드' 형태).\n"
-                f"  3. GUID가 SJVA 에이전트({CONFIG.get("SJVA_AGENT_GUID_PREFIX")})가 아닌 다른 에이전트로 매칭된 경우.\n"
+                f"  3. GUID가 SJVA 에이전트({sjva_prefix_for_log})가 아닌 다른 에이전트로 매칭된 경우.\n"
                 "  4. SJVA 에이전트로 매칭되었으나, 파일명 품번과 DB 제목(또는 정렬제목)에서 추출된 품번이 불일치하는 경우.\n"
                 "  5. SJVA 에이전트로 매칭되었고 파일명 품번은 있으나, DB 제목에서 품번 추출이 안 되는 경우.")
 
