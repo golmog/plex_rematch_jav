@@ -1305,15 +1305,32 @@ async def run_scan_mode(args):
 
             # 2. 스캔 요청 (오류 시 무한 재시도)
             mapped_path_to_scan = map_scan_path(path_to_scan)
-            while not SHUTDOWN_REQUESTED:
+            request_successful = False
+            while not SHUTDOWN_REQUESTED and not request_successful:
                 try:
                     logger.info(f"[{current_progress}/{total_paths}] 경로 스캔 요청: '{mapped_path_to_scan}'")
                     await await_sync(library.update, path=mapped_path_to_scan)
-                    await asyncio.sleep(5)
-                    break
+                    await asyncio.sleep(5) # 요청 후 활동이 감지될 시간을 줌
+                    request_successful = True # 성공 시 플래그 설정하여 루프 탈출
                 except Exception as e:
-                    logger.error(f"'{mapped_path_to_scan}' 스캔 요청 중 오류 발생: {e}. 30초 후 재시도합니다.")
-                    await asyncio.sleep(30)
+                    logger.error(f"'{mapped_path_to_scan}' 스캔 요청 중 오류 발생: {e}.")
+                    logger.warning("Plex 서버가 응답할 수 있을 때까지 (유휴 상태) 대기한 후 재시도합니다...")
+
+                    while not SHUTDOWN_REQUESTED:
+                        try:
+                            active_tasks = await get_plex_library_activities(library)
+                            if not active_tasks:
+                                logger.info("Plex가 유휴 상태가 되었습니다. 스캔 요청을 재시도합니다.")
+                                break # 유휴 상태이므로 대기 종료
+
+                            task = active_tasks[0]
+                            logger.info(f"...Plex 활동 대기 중: [{task.type}] {task.title}...")
+                            await asyncio.sleep(15)
+                        except Exception as e_wait:
+                            logger.error(f"대기 중 Plex 상태 확인 오류: {e_wait}. 30초 후 재시도합니다.")
+                            await asyncio.sleep(30)
+
+                    if SHUTDOWN_REQUESTED: break
 
             if SHUTDOWN_REQUESTED: break
 
