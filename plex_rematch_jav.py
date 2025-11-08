@@ -38,6 +38,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# ANSI 이스케이프 코드 (터미널 색상용)
+class Colors:
+    CYAN = '\033[36m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    ENDC = '\033[0m'
+
 # YAML 설정 파일 기본 경로 (스크립트와 같은 디렉터리)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_YAML_CONFIG_PATH = os.path.join(SCRIPT_DIR, "plex_rematch_jav.yaml")
@@ -99,8 +107,31 @@ FALLBACK_DEFAULT_CONFIG = {
             r'.*?((?:[0-9]{3})?ypp)[-_]?(\d+)(?=[^\d]|\b) => {0}|{1}',
             r'.*?(\d{3})(ap|good|san|ten)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}',
             r'.*?(\d{2})(ap|id|ntrd|san|sora|sw|ten)[-_]?(\d+)(?=[^\d]|\b) => {0}{1}|{2}'
-            ]
+            ],
+        'uncensored_special_rules': [
+            # 1pondo
+            r'.*?(?<![0-9])(1pon|1pondo)[-_\s]?(\d{6})[-_](\d{2,3})(?=[^\d]|\b).*? => 1pon|{1}_{2}',
+            r'.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?(1pon|1pondo)\b.*? => 1pon|{0}_{1}',
+            # 10musume
+            r'.*?(?<![0-9])(10mu|10musume)[-_\s]?(\d{6})[-_](\d{2,3})(?=[^\d]|\b).*? => 10mu|{1}_{2}',
+            r'.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?(10mu|10musume)\b.*? => 10mu|{0}_{1}',
+            # Carib
+            r'.*?(?<![a-z])carib(bean)?(com)?[-_\s]?(\d{6})[-_]?(\d{2,3})(?=[^\d]|\b).*? => carib|{2}-{3}',
+            r'.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?carib(bean)?(com)?\b.*? => carib|{0}-{1}',
+            # FC2
+            r'.*?(?<![a-z])(fc2)[-_\s]?(ppv)?[-_\s]?(\d{5,7})(?=[^\d]|\b).*? => {0}|{2}',
+            # HEYZO
+            r'.*?(?<![a-z])(heyzo)[-_\s]?(\d{4})(?=[^\d]|\b).*? => {0}|{1}',
+            r'.*?(?<![a-z])(heyzo)[-_\s](?:f?hd)[-_\s]?(\d{4})(?=[^\d]|\b).*? => {0}|{1}',
+            r'.*?(?<![0-9])(\d{4})[-_\s]?(heyzo)(?=[^\d]|\b).*? => {1}|{0}',
+            # 기타 레이블 규칙
+            r'.*?(?<![a-z])(c0930)[-_]([a-z]+\d+)(?=[^\d]|\b).*? => {0}|{1}',
+            # Uncensored용 우선 범용 규칙
+            r'.*?\b([0-9a-z]+)-(\d+)(?=[^\d]|\b) => {0}|{1}',
+        ]
     },
+    # 매칭을 시도할 무수정 레이블 목록
+    "UNCENSORED_MATCHABLE_LABELS": ["1pon", "10mu", "carib", "fc2", "heyzo"],
 
     "ACTORS_DB_PATH": None, # 배우 DB 경로
 
@@ -516,24 +547,25 @@ def compile_parsing_rules():
 
     logger.debug("품번 파싱 규칙을 컴파일합니다...")
     raw_rules = CONFIG.get("JAV_PARSING_RULES", {})
-    compiled = {'special': [], 'generic': []}
+    compiled = {'special': [], 'uncensored_special': [], 'generic': []}
 
     rule_parser = re.compile(r'(.*?)\s*=>\s*(.*)')
 
-    # 특수 규칙 컴파일
-    for rule_str in raw_rules.get('censored_special_rules', []):
-        match = rule_parser.match(rule_str)
-        if not match: continue
-
-        pattern, format_body = match.groups()
-        if '|' not in format_body: continue
-
-        label_format, num_format = format_body.split('|', 1)[:2]
-        compiled['special'].append({
-            'pattern': pattern,
-            'label_format': label_format.strip(),
-            'num_format': num_format.strip()
-        })
+    # 특수 규칙 컴파일 (유수정, 무수정 모두 처리)
+    for key, rule_list in [('special', 'censored_special_rules'), ('uncensored_special', 'uncensored_special_rules')]:
+        for rule_str in raw_rules.get(rule_list, []):
+            match = rule_parser.match(rule_str)
+            if not match: continue
+            
+            pattern, format_body = match.groups()
+            if '|' not in format_body: continue
+            
+            label_format, num_format = format_body.split('|', 1)[:2]
+            compiled[key].append({
+                'pattern': pattern,
+                'label_format': label_format.strip(),
+                'num_format': num_format.strip()
+            })
 
     # 범용 규칙 컴파일
     for rule_str in raw_rules.get('generic_rules', []):
@@ -551,7 +583,7 @@ def compile_parsing_rules():
         })
 
     COMPILED_PARSING_RULES = compiled
-    logger.debug(f"규칙 컴파일 완료: 특수 규칙 {len(compiled['special'])}개, 범용 규칙 {len(compiled['generic'])}개")
+    logger.debug(f"규칙 컴파일 완료: 유수정 {len(compiled['special'])}개, 무수정 {len(compiled['uncensored_special'])}개, 범용 {len(compiled['generic'])}개")
 
 
 def parse_product_id_with_rules(text: str) -> Optional[str]:
@@ -565,11 +597,28 @@ def parse_product_id_with_rules(text: str) -> Optional[str]:
         compile_parsing_rules()
 
     normalized_text = text.lower()
-    padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 7)
+    padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 5)
+
+    if CONFIG.get("UNCENSORED"):
+        # 무수정 모드일 경우: uncensored_special -> generic 순서
+        rule_order = ['uncensored_special', 'generic']
+        logger.debug("무수정 모드 파싱 규칙 적용.")
+    else:
+        # 유수정 모드일 경우 (기본): censored_special -> generic 순서
+        rule_order = ['special', 'generic'] # 'special'은 'censored_special_rules'의 별칭
+    
+    # 컴파일된 규칙 딕셔너리의 키를 'special'로 유지하기 위해 매핑
+    rule_key_map = {
+        'special': 'censored_special_rules',
+        'uncensored_special': 'uncensored_special_rules',
+        'generic': 'generic_rules'
+    }
 
     # 특수 규칙과 범용 규칙을 순서대로 순회
-    for rule_type in ['special', 'generic']:
-        for rule in COMPILED_PARSING_RULES.get(rule_type, []):
+    for rule_type in rule_order:
+        # 컴파일된 규칙을 가져올 때 올바른 키 사용
+        compiled_rules = COMPILED_PARSING_RULES.get(rule_type, [])
+        for rule in compiled_rules:
             try:
                 match = re.match(rule['pattern'], normalized_text)
                 if match:
@@ -613,37 +662,54 @@ def normalize_pid_for_comparison(pid_alpha_hyphen_padded_num: str) -> Optional[s
 
     # 1. 레이블 부분 정규화
     normalized_label = label_part_raw.lower()
-    # '741'로 시작하지 않는 경우, 레이블 앞부분의 연속된 숫자만 제거
     if not normalized_label.startswith("741"):
         stripped_from_front = normalized_label.lstrip('0123456789')
-        # lstrip 후에도 문자열이 남아있고, 원래 레이블이 순수 숫자가 아니라면 적용
         if stripped_from_front and not normalized_label.isdigit():
             normalized_label = stripped_from_front
 
-    # 2. 숫자 부분 표준화 (Standardization)
+    # 2. 숫자 부분 표준화
     num_part_lower = num_part_raw.lower()
-    padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 7)
+    standardized_num_part = ""
+    trailing_alpha = ""
 
-    # 숫자와 후행 알파벳 분리 (예: '012a' -> '012', 'a')
-    match = re.match(r"(\d+)([a-z]*)?$", num_part_lower)
-    if not match:
-        logger.warning(f"normalize_pid_for_comparison: 숫자 부분 '{num_part_lower}'에서 숫자/알파벳 패턴 파싱 실패. 원본 사용 시도.")
-        # 파싱 실패 시, 비교 일관성을 위해 원본 숫자 부분을 합쳐서 반환
+    # 먼저 후행 알파벳을 분리 (예: '123a' -> '123', 'a')
+    num_match = re.match(r"([\d_-]+)([a-z]*)?$", num_part_lower)
+    if not num_match:
+        logger.warning(f"normalize_pid_for_comparison: 숫자 부분 '{num_part_lower}'에서 숫자/구분자 패턴 파싱 실패.")
         return normalized_label + num_part_lower
+    
+    num_core = num_match.group(1)
+    trailing_alpha = num_match.group(2) or ""
 
-    numeric_digits_str = match.group(1)
-    trailing_alpha = match.group(2) or ""
-
+    # 구분자('_' 또는 '-')를 기준으로 숫자 부분을 분리
+    # re.split을 사용하여 여러 구분자를 한 번에 처리
+    num_parts = re.split(r'[-_]', num_core)
+    
     try:
-        standardized_num_part = str(int(numeric_digits_str)).zfill(padding_len)
+        if len(num_parts) == 2:
+            # `숫자-숫자` 또는 `숫자_숫자` 형식 (예: 1pondo, carib)
+            part1 = str(int(num_parts[0])).zfill(6)
+            part2 = str(int(num_parts[1])).zfill(3)
+            # 비교를 위해 구분자를 '_'로 통일
+            standardized_num_part = f"{part1}_{part2}"
+        
+        elif len(num_parts) == 1 and num_parts[0].isdigit():
+            # `숫자` 형식 (예: heyzo, fc2 및 대부분의 유수정)
+            padding_len = int(CONFIG.get("NUMERIC_PADDING_LENGTH", 5))
+            standardized_num_part = str(int(num_parts[0])).zfill(padding_len)
+        
+        else:
+            # 예기치 않은 형식 (예: 숫자가 아니거나, 파트가 3개 이상)
+            logger.warning(f"normalize_pid_for_comparison: 예기치 않은 숫자 부분 형식: '{num_core}'. 원본 사용.")
+            standardized_num_part = num_core
+
     except (ValueError, TypeError):
-        logger.warning(f"normalize_pid_for_comparison: 정규식 통과 후에도 '{numeric_digits_str}'를 정수로 변환 실패. zfill만 적용.")
-        standardized_num_part = numeric_digits_str.zfill(padding_len)
+        logger.warning(f"normalize_pid_for_comparison: 숫자 부분 '{num_core}'를 정수로 변환 실패. 원본 사용.")
+        standardized_num_part = num_core
 
     # 3. 최종 비교 문자열 생성
-    # 정규화된 레이블 + 표준화된 숫자 부분 + 후행 알파벳
     final_comparison_pid = normalized_label + standardized_num_part + trailing_alpha
-
+    
     logger.debug(f"normalize_pid_for_comparison: '{pid_alpha_hyphen_padded_num}' (L:'{label_part_raw}', N:'{num_part_raw}') -> '{final_comparison_pid}'")
     return final_comparison_pid
 
@@ -839,13 +905,15 @@ async def unmatch_plex_item(metadata_id: int) -> bool:
             video_file_path = await await_sync(get_media_file_path, metadata_id)
             if video_file_path:
                 video_dir, base_filename = os.path.dirname(video_file_path), os.path.basename(video_file_path)
-                # JSON 파일명 규칙에 따라 품번 추출 (파일명 시작부분)
-                pid_match_for_json = re.match(r"^([a-zA-Z0-9\-]+)", base_filename)
+                pid_match_for_json = re.match(r"^([a-zA-Z0-9\-_]+)", base_filename)
+                
                 if pid_match_for_json:
-                    json_filename = f"{pid_match_for_json.group(1).lower()}.json"
+                    json_filename_base = pid_match_for_json.group(1).lower()
+                    json_filename = f"{json_filename_base}.json"
                     json_file_path = os.path.join(video_dir, json_filename)
+
                     if os.path.exists(json_file_path):
-                        os.remove(json_file_path)
+                        await await_sync(os.remove, json_file_path)
                         logger.info(f"    ID {metadata_id}: 성공 - JSON 파일 삭제: {json_file_path}")
                     else:
                         logger.debug(f"    ID {metadata_id}: 정보 - 해당 경로에 JSON 파일 없음: {json_file_path}")
@@ -1373,7 +1441,7 @@ async def process_single_item_for_auto_rematch(item_row: sqlite3.Row, worker_nam
     current_task_status_val = "ATTEMPTED_NO_CHANGE"
 
     item_title_log = item_row['title'] if 'title' in item_row.keys() and item_row['title'] else f"ID {item_id}"
-    logger.info(f"[{worker_name_for_log}] 처리 시작: ID={item_id}, Title='{item_title_log}'")
+    logger.info(f"{Colors.YELLOW}[{worker_name_for_log}] 처리 시작: ID={item_id}, Title='{item_title_log}'{Colors.ENDC}")
 
     if SHUTDOWN_REQUESTED:
         logger.info(f"[{worker_name_for_log}] ID {item_id}: 종료 요청으로 작업 시작 안 함.")
@@ -1392,6 +1460,25 @@ async def process_single_item_for_auto_rematch(item_row: sqlite3.Row, worker_nam
                 original_filename_pid_parts = (pid_alpha_num_parts[0], pid_alpha_num_parts[1]) # (ALPHA, 00001)
             logger.debug(f"  ID {item_id}: 파일명 원본 품번(패딩됨): '{original_filename_pid}' (파싱된 부분: {original_filename_pid_parts})")
     else: logger.warning(f"  ID {item_id}: 미디어 파일 경로를 찾을 수 없어 파일명 기반 품번 추출 불가.")
+
+    if CONFIG.get("UNCENSORED"):
+        status_to_record = None
+        if not original_filename_pid:
+            status_to_record = "SKIPPED_UNCEN_NO_PID"
+            logger.info(f"  ID {item_id}: [무수정] 파일명에서 품번을 추출할 수 없어 건너뜁니다.")
+        else:
+            label_part = original_filename_pid.split('-', 1)[0]
+            matchable_labels = CONFIG.get("UNCENSORED_MATCHABLE_LABELS", [])
+            if label_part not in matchable_labels:
+                status_to_record = f"SKIPPED_UNCEN_UNMATCHABLE_LABEL ({label_part})"
+                logger.info(f"  ID {item_id}: [무수정] 레이블 '{label_part}'는 매칭 대상이 아니므로 건너뜁니다.")
+        
+        # 건너뛰기 조건에 해당하면, DB 기록 후 즉시 함수 종료
+        if status_to_record:
+            if not CONFIG.get("DRY_RUN"):
+                await await_sync(record_completed_task, item_id, status=status_to_record)
+            logger.info(f"[{worker_name_for_log}] ID {item_id} 처리 완료. 소요 시간: {time.monotonic() - start_time:.2f}초. (상태: {status_to_record})")
+            return False # API 변경 없음
 
     normalized_original_file_pid_for_comp = normalize_pid_for_comparison(original_filename_pid) # 비교용 (예: "alpha00001")
     if normalized_original_file_pid_for_comp:
@@ -2110,7 +2197,7 @@ async def run_interactive_search_and_rematch_mode(args):
 
                 processed_count_in_auto_round += 1
                 percentage_auto_round = (processed_count_in_auto_round / total_selected_for_auto) * 100 if total_selected_for_auto > 0 else 0
-                logger.info(f"\033[36m[SEARCH-AUTO] 진행: {processed_count_in_auto_round}/{total_selected_for_auto} ({percentage_auto_round:.1f}%) - ID {item_data_auto['id']} 처리 시작...\033[0m")
+                logger.info(f"{Colors.CYAN}[SEARCH-AUTO] 진행: {processed_count_in_auto_round}/{total_selected_for_auto} ({percentage_auto_round:.1f}%) - ID {item_data_auto['id']} 처리 시작...{Colors.ENDC}")
 
                 item_id_auto = item_data_auto['id']
                 original_row_auto = item_data_auto['original_row']
@@ -2251,7 +2338,7 @@ async def run_interactive_search_and_rematch_mode(args):
 
                             processed_count_in_fallback_round += 1
                             percentage_fallback_round = (processed_count_in_fallback_round / total_selected_for_fallback) * 100 if total_selected_for_fallback > 0 else 0
-                            logger.info(f"\033[36m[SEARCH-FALLBACK] 진행: {processed_count_in_fallback_round}/{total_selected_for_fallback} ({percentage_fallback_round:.1f}%) - ID {item_data_fb_manual_run['id']} 수동 폴백 시작...\033[0m")
+                            logger.info(f"{Colors.CYAN}[SEARCH-FALLBACK] 진행: {processed_count_in_fallback_round}/{total_selected_for_fallback} ({percentage_fallback_round:.1f}%) - ID {item_data_fb_manual_run['id']} 수동 폴백 시작...{Colors.ENDC}")
 
                             unmatch_ok_fb_run = await unmatch_plex_item(item_data_fb_manual_run['id'])
                             if not unmatch_ok_fb_run:
@@ -2417,7 +2504,7 @@ async def run_auto_rematch_mode(args):
         # 또는 일정 시간 간격으로 출력하도록 조절 가능 (예: time.monotonic() 사용)
         if items_considered_processed != last_logged_processed_count:
             percentage_processed = (items_considered_processed / total_items_to_process_in_queue_initially) * 100 if total_items_to_process_in_queue_initially > 0 else 0
-            logger.info(f"\033[36m진행: {items_considered_processed}/{total_items_to_process_in_queue_initially} ({percentage_processed:.1f}%) 처리 시작됨. (큐 잔여: {items_remaining_in_queue})\033[0m")
+            logger.info(f"{Colors.CYAN}진행: {items_considered_processed}/{total_items_to_process_in_queue_initially} ({percentage_processed:.1f}%) 처리 시작됨. (큐 잔여: {items_remaining_in_queue}){Colors.ENDC}")
             last_logged_processed_count = items_considered_processed
 
         try:
@@ -2432,7 +2519,7 @@ async def run_auto_rematch_mode(args):
         logger.warning("종료 요청으로 인해 새 작업 할당 중단. 현재 큐에 남은 아이템 수: " + str(item_processing_q.qsize()))
     elif item_processing_q.empty() and total_items_to_process_in_queue_initially > 0: # 큐가 비었고, 처리할 아이템이 있었던 경우
         # 마지막으로 100% 완료 로그를 찍어줌
-        logger.info(f"진행: {total_items_to_process_in_queue_initially}/{total_items_to_process_in_queue_initially} (100.0%) 처리 시작됨. (큐 비었음)")
+        logger.info(f"{Colors.CYAN}진행: {total_items_to_process_in_queue_initially}/{total_items_to_process_in_queue_initially} (100.0%) 처리 시작됨. (큐 비었음){Colors.ENDC}")
 
     logger.info("큐 소진 또는 종료 요청 수신. 워커 태스크들의 완료/취소를 기다립니다...")
 
@@ -3056,7 +3143,7 @@ async def run_fix_labels_mode(args):
 
                     processed_count_in_auto_round_fix += 1
                     percentage_auto_round_fix = (processed_count_in_auto_round_fix / total_selected_for_auto_fix) * 100 if total_selected_for_auto_fix > 0 else 0
-                    logger.info(f"\033[36m[FIXLABELS-AUTO] 진행: {processed_count_in_auto_round_fix}/{total_selected_for_auto_fix} ({percentage_auto_round_fix:.1f}%) - ID {item_data_auto_fix['id']} 처리 시작...\033[0m")
+                    logger.info(f"{Colors.CYAN}[FIXLABELS-AUTO] 진행: {processed_count_in_auto_round_fix}/{total_selected_for_auto_fix} ({percentage_auto_round_fix:.1f}%) - ID {item_data_auto_fix['id']} 처리 시작...{Colors.ENDC}")
 
                     item_id_auto_fix = item_data_auto_fix['id']
                     original_row_auto_fix = item_data_auto_fix['original_row']
@@ -3203,7 +3290,7 @@ async def run_fix_labels_mode(args):
 
                             processed_count_in_fallback_round_fix += 1
                             percentage_fallback_round_fix = (processed_count_in_fallback_round_fix / total_selected_for_fallback_fix) * 100 if total_selected_for_fallback_fix > 0 else 0
-                            logger.info(f"\033[36m[FIXLABELS-FALLBACK] 진행: {processed_count_in_fallback_round_fix}/{total_selected_for_fallback_fix} ({percentage_fallback_round_fix:.1f}%) - ID {item_data_fb_manual_run_fix['id']} 수동 폴백 시작...\033[0m")
+                            logger.info(f"{Colors.CYAN}[FIXLABELS-FALLBACK] 진행: {processed_count_in_fallback_round_fix}/{total_selected_for_fallback_fix} ({percentage_fallback_round_fix:.1f}%) - ID {item_data_fb_manual_run_fix['id']} 수동 폴백 시작...{Colors.ENDC}")
 
                             unmatch_ok_fb_run_fix = await unmatch_plex_item(item_data_fb_manual_run_fix['id'])
                             if not unmatch_ok_fb_run_fix:
@@ -4275,6 +4362,11 @@ async def run_find_dupes_mode(args):
 
 async def main():
     global CONFIG, SHUTDOWN_REQUESTED
+
+    # Windows에서 ANSI 색상 지원 활성화
+    if sys.platform == "win32":
+        os.system("")
+
     parser = argparse.ArgumentParser(description="Plex 미디어 아이템 재매칭", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     info_group = parser.add_argument_group('정보 조회 옵션')
     info_group.add_argument("--check-id", "--list-sections", action="store_true", help="Plex DB의 모든 라이브러리 섹션 정보를 출력하고 종료합니다.")
@@ -4309,6 +4401,7 @@ async def main():
     rematch_group.add_argument("--match-interval", type=int, help=f"각 아이템 처리 후 대기 시간 (초) (기본값: YAML 또는 {FALLBACK_DEFAULT_CONFIG['MATCH_INTERVAL']})")
     rematch_group.add_argument("--move-no-meta", action="store_true", help="메타데이터가 없는 아이템을 지정된 경로로 이동하고 라이브러리에서 제거합니다.")
     rematch_group.add_argument("--force-complete", action="store_true", help="미완료 리스트에서 선택 항목을 '완료' 상태로 강제 처리합니다.")
+    rematch_group.add_argument("--uncen", "--uncensored", dest="uncensored", action="store_true", help="무수정(Uncensored) 라이브러리 모드로 동작합니다. 품번 파싱 규칙 및 매칭 로직이 변경됩니다.")
     rematch_group.add_argument("--update-actors", action="store_true", help="외부 배우 DB와 비교하여 업데이트 된 배우정보로 새로고침합니다.")
 
     scan_group = parser.add_argument_group('라이브러리 스캔 옵션')
