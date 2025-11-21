@@ -4360,6 +4360,165 @@ async def run_find_dupes_mode(args):
     logger.info(f"--find-dupes 모드 완료. 총 {processed_items_count}개 아이템 처리 시도됨.")
 
 
+async def run_clean_db_mode(args):
+    """
+    Plex DB와 대조하여 더 이상 유효하지 않은 완료 기록을 정리하고 DB를 최적화합니다.
+    (전체 라이브러리 대상)
+    """
+    global CONFIG
+    
+    logger.info("DB 정리 및 최적화 작업을 시작합니다 (전체 라이브러리 대상)...")
+
+    # 1. Plex DB에서 현재 유효한 모든 아이템 ID 가져오기
+    logger.info("Plex DB에서 현재 유효한 아이템 ID 목록을 가져옵니다...")
+    # metadata_items 테이블 전체를 조회 (섹션 구분 없음)
+    query_plex = "SELECT id FROM metadata_items"
+    
+    # fetch_all은 딕셔너리 리스트를 반환함
+    valid_plex_ids_rows = await await_sync(fetch_all, query_plex)
+    valid_plex_ids = set(row['id'] for row in valid_plex_ids_rows)
+    logger.info(f"  - Plex DB 유효 아이템 수: {len(valid_plex_ids)}개")
+
+    # 2. 스크립트 DB(completed_tasks)의 모든 ID 가져오기
+    @require_cursor("COMPLETION_DB")
+    def get_all_completed_ids(cs: sqlite3.Cursor = None) -> List[int]:
+        cs.execute("SELECT metadata_id FROM completed_tasks")
+        return [row[0] for row in cs.fetchall()]
+
+    @require_cursor("COMPLETION_DB")
+    def delete_orphan_records(orphan_ids: List[int], cs: sqlite3.Cursor = None) -> int:
+        if not orphan_ids: return 0
+        # executemany를 사용하여 효율적으로 삭제
+        cs.executemany("DELETE FROM completed_tasks WHERE metadata_id = ?", [(id,) for id in orphan_ids])
+        return cs.rowcount
+
+    @require_cursor("COMPLETION_DB")
+    def vacuum_db(cs: sqlite3.Cursor = None):
+        cs.execute("VACUUM")
+
+    logger.info("스크립트 완료 DB에서 기록된 아이템 ID 목록을 가져옵니다...")
+    completed_ids = await await_sync(get_all_completed_ids)
+    logger.info(f"  - 완료 DB 기록 수: {len(completed_ids)}개")
+
+    # 3. 고아 레코드 식별 (스크립트 DB에는 있지만 Plex DB에는 없는 ID)
+    orphan_ids = [id for id in completed_ids if id not in valid_plex_ids]
+    orphan_count = len(orphan_ids)
+
+    if orphan_count > 0:
+        logger.info(f"총 {orphan_count}개의 고아 레코드(삭제된 아이템)를 발견했습니다. 정리를 시작합니다...")
+        
+        # 4. 삭제 실행
+        # await_sync로 래핑하여 실행해야 함
+        await await_sync(delete_orphan_records, orphan_ids)
+        logger.info(f"  - {orphan_count}개 레코드 삭제 완료.")
+        
+        # 5. VACUUM 실행
+        logger.info("DB 최적화(VACUUM)를 실행합니다...")
+        await await_sync(vacuum_db)
+        logger.info("  - DB 최적화 완료.")
+    else:
+        logger.info("정리할 고아 레코드가 없습니다. DB가 이미 깨끗합니다.")
+        
+        # 레코드는 없어도 사용자가 명시적으로 요청했으므로 VACUUM 실행
+        logger.info("DB 최적화(VACUUM)를 실행합니다...")
+        await await_sync(vacuum_db)
+        logger.info("  - DB 최적화 완료.")
+
+    logger.info("--clean-db 작업이 완료되었습니다.")
+
+
+async def analyze_plex_item(item_id: int) -> bool:
+    """Plex API를 통해 아이템의 미디어 분석을 요청합니다."""
+    global PLEX_SERVER_INSTANCE, CONFIG
+    
+    if not PLEXAPI_AVAILABLE:
+        logger.error("plexapi 라이브러리가 필요합니다.")
+        return False
+
+    try:
+        if PLEX_SERVER_INSTANCE is None:
+            PLEX_SERVER_INSTANCE = PlexServer(CONFIG["PLEX_URL"], CONFIG["PLEX_TOKEN"])
+
+        item = await await_sync(PLEX_SERVER_INSTANCE.fetchItem, item_id)
+        logger.info(f"  ID {item_id}: 미디어 분석 요청...")
+        
+        if not CONFIG.get("DRY_RUN"):
+            await await_sync(item.analyze)
+            logger.info(f"  ID {item_id}: 분석 요청 완료.")
+        else:
+            logger.info(f"  [DRY RUN] ID {item_id}: 분석 요청 시뮬레이션.")
+        return True
+    except Exception as e:
+        logger.error(f"  ID {item_id}: 분석 요청 중 오류 발생: {e}")
+        return False
+
+async def run_analyze_missing_mode(args):
+    """미디어 분석이 누락된 아이템을 찾아 처리합니다."""
+    global CONFIG, SHUTDOWN_REQUESTED
+
+    lib_id = CONFIG.get("ID")
+    if not lib_id:
+        logger.error("--analyze-missing 모드에는 --section-id가 필수입니다.")
+        return
+
+    logger.info(f"--analyze-missing 모드 시작. 대상 라이브러리 ID: {lib_id}")
+    
+    # width가 NULL인 항목 찾기 (가장 확실한 미분석 지표)
+    query = """
+    SELECT mi.id, mi.title, mp.file
+    FROM metadata_items mi
+    JOIN media_items mpi ON mpi.metadata_item_id = mi.id
+    JOIN media_parts mp ON mp.media_item_id = mpi.id
+    WHERE mi.library_section_id = ? AND mi.metadata_type = 1
+      AND mpi.width IS NULL
+    GROUP BY mi.id
+    ORDER BY mi.title_sort ASC
+    """
+    
+    unanalized_items = await await_sync(fetch_all, query, (str(lib_id),))
+    
+    if not unanalized_items:
+        logger.info("미디어 분석이 필요한 항목이 없습니다. 모든 항목이 분석되었습니다.")
+        return
+
+    print(f"\n--- 미디어 분석 미완료 항목 ({len(unanalized_items)}개) ---")
+    header = "{idx:<5s} | {id:<7s} | {title:<60s} | {file}"
+    print(header.format(idx="No.", id="ID", title="Title", file="File"))
+    print("-" * 120)
+    
+    for i, item in enumerate(unanalized_items):
+        title_disp = item['title'][:58] + '..' if len(item['title']) > 60 else item['title']
+        file_disp = os.path.basename(item['file'])
+        file_disp = file_disp[:40] + '..' if len(file_disp) > 42 else file_disp
+        print(header.format(idx=str(i + 1), id=str(item['id']), title=title_disp, file=file_disp))
+    print("-" * 120)
+
+    # 사용자 확인
+    try:
+        confirm = await asyncio.get_running_loop().run_in_executor(
+            None, input, f"\n위 {len(unanalized_items)}개 항목에 대해 미디어 분석을 실행하시겠습니까? (Y/N): "
+        )
+        if confirm.lower().strip() != 'y':
+            logger.info("작업을 취소했습니다.")
+            return
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    logger.info("미디어 분석 작업을 시작합니다...")
+    
+    processed_count = 0
+    for item in unanalized_items:
+        if SHUTDOWN_REQUESTED: break
+        
+        if await analyze_plex_item(item['id']):
+            processed_count += 1
+        
+        # 너무 빠른 요청 방지
+        await asyncio.sleep(0.5)
+
+    logger.info(f"총 {processed_count}개 항목에 대한 분석 요청을 완료했습니다.")
+
+
 async def main():
     global CONFIG, SHUTDOWN_REQUESTED
 
@@ -4368,10 +4527,11 @@ async def main():
         os.system("")
 
     parser = argparse.ArgumentParser(description="Plex 미디어 아이템 재매칭", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    info_group = parser.add_argument_group('정보 조회 옵션')
+    info_group = parser.add_argument_group('정보 조회 및 유지보수 옵션')
     info_group.add_argument("--check-id", "--list-sections", action="store_true", help="Plex DB의 모든 라이브러리 섹션 정보를 출력하고 종료합니다.")
     info_group.add_argument("--find-dupes", action="store_true", help="지정된 섹션 내에서 중복된 품번을 가진 아이템들을 찾아 목록으로 보여줍니다.")
     info_group.add_argument("-v", "--verbose", action="count", default=0, help="상세 로깅 수준을 높입니다 (-v: INFO, -vv: DEBUG).")
+    info_group.add_argument("--clean-db", action="store_true", help="Plex 라이브러리에 더 이상 존재하지 않는 아이템의 기록을 정리하고 DB를 최적화(VACUUM)합니다.")
 
     rematch_group = parser.add_argument_group('재매칭 및 필터링 옵션')
     rematch_group.add_argument("--section-id", type=int, dest="id", help="[필수] 작업 대상 라이브러리 섹션 ID")
@@ -4403,6 +4563,7 @@ async def main():
     rematch_group.add_argument("--force-complete", action="store_true", help="미완료 리스트에서 선택 항목을 '완료' 상태로 강제 처리합니다.")
     rematch_group.add_argument("--uncen", "--uncensored", dest="uncensored", action="store_true", help="무수정(Uncensored) 라이브러리 모드로 동작합니다. 품번 파싱 규칙 및 매칭 로직이 변경됩니다.")
     rematch_group.add_argument("--update-actors", action="store_true", help="외부 배우 DB와 비교하여 업데이트 된 배우정보로 새로고침합니다.")
+    rematch_group.add_argument("--analyze-missing", action="store_true", help="미디어 분석이 완료되지 않은 항목을 찾아 분석 명령을 내립니다.")
 
     scan_group = parser.add_argument_group('라이브러리 스캔 옵션')
     scan_group.add_argument("--scan-full", action="store_true", help="섹션 경로를 정해진 depth로 분할하여 순차적으로 스캔합니다.")
@@ -4522,7 +4683,10 @@ async def main():
 
             for sec_dict_row in sections_list:
                 s_type_code = sec_dict_row['section_type'] if 'section_type' in sec_dict_row.keys() else None
-                s_type_str = PLEX_SECTION_TYPE_VALUES.get(s_type_code, str(s_type_code))
+                if s_type_code is not None:
+                    s_type_str = PLEX_SECTION_TYPE_VALUES.get(s_type_code, str(s_type_code))
+                else:
+                    s_type_str = "Unknown (None)"
                 s_name_val = sec_dict_row['name'] if 'name' in sec_dict_row.keys() and sec_dict_row['name'] else ''
                 s_name_str = (s_name_val[:27]+'...') if len(s_name_val) > 30 else s_name_val
                 section_agent_val = sec_dict_row['agent'] if 'agent' in sec_dict_row.keys() and sec_dict_row['agent'] is not None else ''
@@ -4542,6 +4706,10 @@ async def main():
     if not CONFIG.get("PLEX_TOKEN") or "_YOUR_PLEX_TOKEN_" in CONFIG.get("PLEX_TOKEN",""):
         logger.critical("오류: PLEX_TOKEN이 설정되지 않았거나 기본값입니다. YAML 파일 또는 --plex-token 옵션으로 설정해주세요.")
         sys.exit(1)
+
+    if CONFIG.get("CLEAN_DB"):
+        await run_clean_db_mode(args)
+        sys.exit(0)
 
     # --id (라이브러리 ID)는 여전히 필수 (단, --check-id 제외)
     if not args.check_id and CONFIG.get("ID") is None:
@@ -4570,6 +4738,10 @@ async def main():
         logger.info("--------------------------------------------------")
 
     try:
+        if CONFIG.get("ANALYZE_MISSING"):
+            await run_analyze_missing_mode(args)
+            return
+
         if CONFIG.get("FORCE_COMPLETE"):
             await run_force_complete_mode(args)
             return
