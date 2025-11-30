@@ -1231,7 +1231,7 @@ async def run_scan_mode(args):
                         progress_val = getattr(task, 'progress', 0)
                         details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
                         details_str = f" - {', '.join(details)}" if details else ""
-                        logger.info(f"Plex 활동 대기 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                        logger.debug(f"Plex 활동 대기 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
                     logger.info("...Plex가 이전 작업을 완료할 때까지 15초 대기합니다...")
                     await asyncio.sleep(15)
                 except Exception as e:
@@ -1256,7 +1256,7 @@ async def run_scan_mode(args):
                         progress_val = getattr(task, 'progress', 0)
                         details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
                         details_str = f" - {', '.join(details)}" if details else ""
-                        logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                        logger.debug(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
                     await asyncio.sleep(15)
                 except Exception as e:
                     logger.error(f"스캔 진행 상태 확인 중 오류: {e}. 30초 후 재시도합니다.")
@@ -1282,7 +1282,7 @@ async def run_scan_mode(args):
 
             while not SHUTDOWN_REQUESTED:
                 try:
-                    prompt_msg = "계속 [I]어서하시겠습니까, [S]새로 시작하시겠습니까, 아니면 [Q]종료하시겠습니까? "
+                    prompt_msg = "계속 [I]이어서 하시겠습니까, [S]새로 시작하시겠습니까, 아니면 [Q]종료하시겠습니까? "
                     choice = await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg)
                     choice = choice.lower().strip()
                 except (EOFError, KeyboardInterrupt):
@@ -1363,7 +1363,7 @@ async def run_scan_mode(args):
                     progress_val = getattr(task, 'progress', 0)
                     details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
                     details_str = f" - {', '.join(details)}" if details else ""
-                    logger.info(f"...Plex 활동 대기 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                    logger.debug(f"...Plex 활동 대기 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
                     await asyncio.sleep(15)
                 except Exception as e:
                     logger.error(f"Plex 상태 확인 중 오류 발생: {e}. 30초 후 재시도합니다.")
@@ -1392,7 +1392,7 @@ async def run_scan_mode(args):
                                 break # 유휴 상태이므로 대기 종료
 
                             task = active_tasks[0]
-                            logger.info(f"...Plex 활동 대기 중: [{task.type}] {task.title}...")
+                            logger.debug(f"...Plex 활동 대기 중: [{task.type}] {task.title}...")
                             await asyncio.sleep(15)
                         except Exception as e_wait:
                             logger.error(f"대기 중 Plex 상태 확인 오류: {e_wait}. 30초 후 재시도합니다.")
@@ -1413,7 +1413,7 @@ async def run_scan_mode(args):
                     progress_val = getattr(task, 'progress', 0)
                     details = [d for d in (getattr(task, 'subtitle', None), getattr(task, 'context', None)) if d]
                     details_str = f" - {', '.join(details)}" if details else ""
-                    logger.info(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
+                    logger.debug(f"...스캔 진행 중: [{task.type}] {task.title}{details_str} ({progress_val:.0f}%)")
                     await asyncio.sleep(15)
                 except Exception as e:
                     logger.error(f"스캔 진행 상태 확인 중 오류 발생: {e}. 30초 후 재시도합니다.")
@@ -1905,10 +1905,21 @@ async def run_interactive_search_and_rematch_mode(args):
 
         if search_field_val == 'title':
             base_s_query += " AND mi.title LIKE ?"
-            s_params_list.append(f'%{actual_search_keyword_for_query}%')
+            
+            # 사용자가 와일드카드를 직접 입력했다면 그대로 사용, 아니면 양쪽에 % 추가
+            if '%' in actual_search_keyword_for_query or '_' in actual_search_keyword_for_query:
+                s_params_list.append(actual_search_keyword_for_query)
+            else:
+                s_params_list.append(f'%{actual_search_keyword_for_query}%')
+            
         elif search_field_val == 'label':
             base_s_query += " AND mi.title_sort LIKE ?"
-            s_params_list.append(f'%{actual_search_keyword_for_query}%')
+            
+            if '%' in actual_search_keyword_for_query or '_' in actual_search_keyword_for_query:
+                s_params_list.append(actual_search_keyword_for_query)
+            else:
+                s_params_list.append(f'%{actual_search_keyword_for_query}%')
+
         elif search_field_val == 'site':
             site_key = actual_search_keyword_for_query.lower()
             target_prefixes = site_code_map_from_config.get(site_key)
@@ -2681,7 +2692,7 @@ async def run_plex_dance_for_item(item_id: int) -> bool:
             # get_plex_library_activities는 라이브러리 객체를 받으므로, 라이브러리 단위로 확인
             active_tasks = await get_plex_library_activities(library)
             if not active_tasks: break
-            logger.info(f"  ...스캔 진행 중: {active_tasks[0].title} ({getattr(active_tasks[0], 'progress', 0):.0f}%)")
+            logger.debug(f"  ...스캔 진행 중: {active_tasks[0].title} ({getattr(active_tasks[0], 'progress', 0):.0f}%)")
             await asyncio.sleep(5)
         logger.info("  ...스캔 완료.")
         if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Plex Dance 중단 요청")
