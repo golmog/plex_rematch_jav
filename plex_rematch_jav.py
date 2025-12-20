@@ -43,6 +43,7 @@ class Colors:
     CYAN = '\033[36m'
     YELLOW = '\033[93m'
     RED = '\033[91m'
+    LIGHT_MAGENTA = '\033[95m'
     BOLD = '\033[1m'
     ENDC = '\033[0m'
 
@@ -72,6 +73,7 @@ FALLBACK_DEFAULT_CONFIG = {
     "NUMERIC_PADDING_LENGTH": 5,
     "MATCH_LIMIT": 0,
     "MATCH_INTERVAL": 2,
+    "MATCH_FAILURE_INTERVAL": 3,
 
     "SCAN_DEPTH": 2,
     "SCAN_PATH_MAPPING_ENABLED": False,
@@ -115,6 +117,9 @@ FALLBACK_DEFAULT_CONFIG = {
             # 10musume
             r'.*?(?<![0-9])(10mu|10musume)[-_\s]?(\d{6})[-_](\d{2,3})(?=[^\d]|\b).*? => 10mu|{1}_{2}',
             r'.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?(10mu|10musume)\b.*? => 10mu|{0}_{1}',
+            # Pacopacomama
+            r'.*?(?<![a-z])(paco|pacopacom|pacopacomama)[-_\s]?(\d{6})[-_](\d{2,3})(?=[^\d]|\b).*? => paco|{1}_{2}',
+            r'.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?(paco|pacopacom|pacopacomama)\b.*? => paco|{0}_{1}',
             # Carib
             r'.*?(?<![a-z])carib(bean)?(com)?[-_\s]?(\d{6})[-_]?(\d{2,3})(?=[^\d]|\b).*? => carib|{2}-{3}',
             r'.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?carib(bean)?(com)?\b.*? => carib|{0}-{1}',
@@ -131,7 +136,7 @@ FALLBACK_DEFAULT_CONFIG = {
         ]
     },
     # 매칭을 시도할 무수정 레이블 목록
-    "UNCENSORED_MATCHABLE_LABELS": ["1pon", "10mu", "carib", "fc2", "heyzo"],
+    "UNCENSORED_MATCHABLE_LABELS": ["1pon", "10mu", "paco", "carib", "fc2", "heyzo"],
 
     "ACTORS_DB_PATH": None, # 배우 DB 경로
 
@@ -566,6 +571,7 @@ def compile_parsing_rules():
                 'label_format': label_format.strip(),
                 'num_format': num_format.strip()
             })
+            logger.debug(f"  컴파일된 규칙 ({key}): '{pattern}'")
 
     # 범용 규칙 컴파일
     for rule_str in raw_rules.get('generic_rules', []):
@@ -599,10 +605,30 @@ def parse_product_id_with_rules(text: str) -> Optional[str]:
     normalized_text = text.lower()
     padding_len = CONFIG.get("NUMERIC_PADDING_LENGTH", 5)
 
-    if CONFIG.get("UNCENSORED"):
+    # 설정된 모드 가져오기
+    is_uncensored_mode = CONFIG.get("UNCENSORED")
+    
+    # 설정이 꺼져있더라도, 텍스트가 무수정 레이블 패턴으로 시작하면 강제로 켜기 (자동 감지)
+    if not is_uncensored_mode:
+        matchable_labels = CONFIG.get("UNCENSORED_MATCHABLE_LABELS", [])
+        
+        if matchable_labels:
+            # 리스트를 'label1|label2|label3' 형태의 문자열로 변환
+            # re.escape를 사용하여 레이블에 특수문자가 있을 경우를 대비
+            pattern_str = '|'.join(re.escape(label) for label in matchable_labels)
+            
+            # 동적으로 정규식 생성: ^(label1|label2|...)-
+            regex_pattern = f'^({pattern_str})-'
+            
+            if re.match(regex_pattern, normalized_text):
+                is_uncensored_mode = True
+                # logger.debug(f"텍스트 '{text}'에서 무수정 패턴 감지. 무수정 규칙을 적용합니다.")
+            
+    # 모드에 따라 규칙 순서 결정
+    if is_uncensored_mode:
         # 무수정 모드일 경우: uncensored_special -> generic 순서
         rule_order = ['uncensored_special', 'generic']
-        logger.debug("무수정 모드 파싱 규칙 적용.")
+        # logger.debug("무수정 모드 파싱 규칙 적용.")
     else:
         # 유수정 모드일 경우 (기본): censored_special -> generic 순서
         rule_order = ['special', 'generic'] # 'special'은 'censored_special_rules'의 별칭
@@ -619,6 +645,7 @@ def parse_product_id_with_rules(text: str) -> Optional[str]:
         # 컴파일된 규칙을 가져올 때 올바른 키 사용
         compiled_rules = COMPILED_PARSING_RULES.get(rule_type, [])
         for rule in compiled_rules:
+            # logger.debug(f"  규칙 시도: '{rule['pattern']}' on '{normalized_text}'")
             try:
                 match = re.match(rule['pattern'], normalized_text)
                 if match:
@@ -889,17 +916,22 @@ async def check_plex_update(metadata_id: int, start_timestamp: int) -> bool:
 
 
 async def unmatch_plex_item(metadata_id: int) -> bool:
-    """로컬 JSON 정리 및 Plex API를 통한 아이템 언매치를 수행합니다."""
+    """로컬 JSON 정리 및 Plex API를 통한 아이템 언매치를 수행합니다. (최적화 포함)"""
     if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Shutdown requested before unmatch_plex_item")
     if not PLEXAPI_AVAILABLE:
         logger.error("plexapi 라이브러리가 없어 unmatch_plex_item을 실행할 수 없습니다.")
         return False
 
     item_info_row = await get_metadata_by_id(metadata_id)
-    item_title_for_log = item_info_row['title'] if item_info_row and 'title' in item_info_row.keys() and item_info_row['title'] else f"ID {metadata_id}"
-    logger.info(f"  ID {metadata_id} ('{item_title_for_log}'): 언매칭...")
+    # 아이템 정보를 가져오지 못했다면 실패 처리
+    if not item_info_row:
+        logger.warning(f"  ID {metadata_id}: DB에서 아이템 정보를 찾을 수 없습니다.")
+        return False
 
-    # 로컬 JSON 파일 삭제 로직
+    item_title_for_log = item_info_row['title'] or f"ID {metadata_id}"
+    logger.info(f"  ID {metadata_id} ('{item_title_for_log}'): 언매칭 준비...")
+
+    # 1. 로컬 JSON 파일 삭제 로직 (항상 수행)
     if not CONFIG.get("DRY_RUN"):
         try:
             video_file_path = await await_sync(get_media_file_path, metadata_id)
@@ -922,46 +954,71 @@ async def unmatch_plex_item(metadata_id: int) -> bool:
             else:
                 logger.warning(f"    ID {metadata_id}: 동영상 파일 경로를 찾을 수 없어 JSON 파일 정리 불가.")
         except Exception as e_json_del:
-            logger.error(f"    ID {metadata_id}: 로컬 JSON 파일 처리 중 오류 발생: {e_json_del}", exc_info=True)
+            logger.error(f"    ID {metadata_id}: 로컬 JSON 파일 처리 중 오류: {e_json_del}")
     else:
         logger.info(f"[DRY RUN] ID {metadata_id}: 로컬 JSON 파일 삭제/정리 건너뜀.")
 
-    # Plex API를 통한 언매치
+    # 2. Plex API 언매치 최적화 (GUID 확인)
+    current_guid = item_info_row['guid']
+    
+    # 이미 언매치된 상태인지 확인하는 조건들
+    is_already_unmatched = (
+        not current_guid or 
+        current_guid.startswith('local://') or 
+        current_guid.startswith('com.plexapp.agents.none://')
+    )
+
+    if is_already_unmatched:
+        logger.info(f"    ID {metadata_id}: 이미 언매치 상태(GUID: {current_guid})이므로 API 호출을 건너뜁니다.")
+        return True # 성공으로 간주
+
+    # 3. 실제 언매치 API 호출 (재시도 로직 포함)
     plex_url, plex_token = CONFIG.get("PLEX_URL"), CONFIG.get("PLEX_TOKEN")
     if not (plex_url and plex_token):
-        logger.error("Plex URL 또는 토큰이 설정되지 않았습니다 (plexapi unmatch)."); return False
+        logger.error("Plex URL/토큰 미설정."); return False
 
-    # logger.info(f"  ID {metadata_id} ('{item_title_for_log}'): plexapi로 매치 해제 시도...")
-    try:
-        def _unmatch_sync_call():
-            global PLEX_SERVER_INSTANCE
-            server_instance = PLEX_SERVER_INSTANCE
-            try:
-                if server_instance is None:
-                    server_instance = PlexServer(plex_url, plex_token, timeout=CONFIG.get("REQUESTS_TIMEOUT_PUT"))
-                    PLEX_SERVER_INSTANCE = server_instance
+    def _unmatch_sync_call():
+        global PLEX_SERVER_INSTANCE
+        server_instance = PLEX_SERVER_INSTANCE
+        try:
+            if server_instance is None:
+                server_instance = PlexServer(plex_url, plex_token, timeout=CONFIG.get("REQUESTS_TIMEOUT_PUT"))
+                PLEX_SERVER_INSTANCE = server_instance
 
-                plex_item_obj = server_instance.fetchItem(int(metadata_id)) # ratingKey로 아이템 가져오기
-                plex_item_obj.unmatch() # 아이템 언매치
-                logger.info(f"    ID {metadata_id}: plexapi를 통해 매치 해제 완료.")
-                return True
-            except PlexApiNotFound:
-                logger.info(f"    ID {metadata_id}: plexapi - 아이템을 찾을 수 없음 (이미 unmatch 상태일 수 있음).")
-                return True # 찾을 수 없는 것도 성공으로 간주 (목표 달성)
-            except requests.exceptions.ConnectionError as conn_err_plex:
-                logger.error(f"    ID {metadata_id}: plexapi - Plex 서버 연결 실패: {conn_err_plex}")
-                PLEX_SERVER_INSTANCE = None # 연결 실패 시 인스턴스 리셋
-                return False
-            except Exception as sync_call_err:
-                logger.error(f"    ID {metadata_id}: plexapi - 매치 해제 중 내부 오류 발생: {sync_call_err}", exc_info=True)
-                return False
+            plex_item_obj = server_instance.fetchItem(int(metadata_id))
+            plex_item_obj.unmatch()
+            logger.info(f"    ID {metadata_id}: plexapi를 통해 매치 해제 완료.")
+            return True
+        except PlexApiNotFound:
+            logger.info(f"    ID {metadata_id}: plexapi - 아이템을 찾을 수 없음 (이미 unmatch 상태일 수 있음).")
+            return True
+        except requests.exceptions.ConnectionError as conn_err_plex:
+            logger.error(f"    ID {metadata_id}: plexapi - Plex 서버 연결 실패: {conn_err_plex}")
+            PLEX_SERVER_INSTANCE = None
+            return False
+        except Exception as sync_call_err:
+            # 500 에러 등은 여기서 잡힙니다.
+            logger.error(f"    ID {metadata_id}: plexapi - 매치 해제 중 내부 오류 발생: {sync_call_err}")
+            return False
 
-        return await await_sync(_unmatch_sync_call)
-    except asyncio.CancelledError:
-        logger.warning(f"  ID {metadata_id}: plexapi 매치 해제 작업 중 명시적으로 취소됨."); raise
-    except Exception as async_call_err:
-        logger.error(f"  ID {metadata_id}: plexapi 매치 해제 비동기 호출 설정 중 오류 발생: {async_call_err}", exc_info=True)
-        return False
+    max_retries = 3
+    for attempt in range(max_retries):
+        if SHUTDOWN_REQUESTED: raise asyncio.CancelledError("Shutdown requested during unmatch retry")
+        
+        # 동기 함수 호출
+        success = await await_sync(_unmatch_sync_call)
+        
+        if success:
+            return True
+        
+        if attempt < max_retries - 1:
+            retry_delay = 3
+            logger.warning(f"    ID {metadata_id}: 언매치 실패. {retry_delay}초 후 재시도합니다 ({attempt+1}/{max_retries}).")
+            await asyncio.sleep(retry_delay)
+    
+    # 모든 재시도 실패 시
+    logger.error(f"    ID {metadata_id}: 최대 재시도 횟수 초과. 언매치 최종 실패.")
+    return False
 
 
 async def refresh_plex_item_metadata(metadata_id: int) -> bool:
@@ -1282,9 +1339,10 @@ async def run_scan_mode(args):
 
             while not SHUTDOWN_REQUESTED:
                 try:
-                    prompt_msg = "계속 [I]이어서 하시겠습니까, [S]새로 시작하시겠습니까, 아니면 [Q]종료하시겠습니까? "
+                    prompt_msg = "계속 [I]이어서 하시겠습니까, [s]새로 시작하시겠습니까, 아니면 [q]종료하시겠습니까? "
                     choice = await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg)
                     choice = choice.lower().strip()
+                    if not choice: choice = 'i'
                 except (EOFError, KeyboardInterrupt):
                     SHUTDOWN_REQUESTED = True
                     break
@@ -1439,9 +1497,10 @@ async def run_scan_mode(args):
 async def process_single_item_for_auto_rematch(item_row: sqlite3.Row, worker_name_for_log: str) -> bool:
     item_id = item_row['id']; start_time = time.monotonic(); api_changed_flag = False
     current_task_status_val = "ATTEMPTED_NO_CHANGE"
+    is_rematch_success = False 
 
     item_title_log = item_row['title'] if 'title' in item_row.keys() and item_row['title'] else f"ID {item_id}"
-    logger.info(f"{Colors.YELLOW}[{worker_name_for_log}] 처리 시작: ID={item_id}, Title='{item_title_log}'{Colors.ENDC}")
+    logger.info(f"{Colors.LIGHT_MAGENTA}[{worker_name_for_log}] 처리 시작: ID={item_id}, Title='{item_title_log}'{Colors.ENDC}")
 
     if SHUTDOWN_REQUESTED:
         logger.info(f"[{worker_name_for_log}] ID {item_id}: 종료 요청으로 작업 시작 안 함.")
@@ -1461,7 +1520,23 @@ async def process_single_item_for_auto_rematch(item_row: sqlite3.Row, worker_nam
             logger.debug(f"  ID {item_id}: 파일명 원본 품번(패딩됨): '{original_filename_pid}' (파싱된 부분: {original_filename_pid_parts})")
     else: logger.warning(f"  ID {item_id}: 미디어 파일 경로를 찾을 수 없어 파일명 기반 품번 추출 불가.")
 
-    if CONFIG.get("UNCENSORED"):
+    # 현재 설정된 모드
+    is_uncensored_mode = CONFIG.get("UNCENSORED")
+    
+    # 설정이 꺼져있어도 품번을 보고 무수정 모드인지 자동 감지
+    if not is_uncensored_mode and original_filename_pid:
+        matchable_labels = CONFIG.get("UNCENSORED_MATCHABLE_LABELS", [])
+        
+        # '-'로 분리하여 앞부분(레이블) 확인.
+        label_part = original_filename_pid.split('-', 1)[0]
+        
+        # 설정된 무수정 레이블 목록에 포함되어 있다면 무수정 모드로 전환
+        if label_part in matchable_labels:
+            is_uncensored_mode = True
+            logger.info(f"  ID {item_id}: 품번 '{original_filename_pid}'에서 무수정 레이블 감지. 무수정 모드로 처리합니다.")
+
+    # 무수정 모드(설정됨 OR 자동감지됨)일 때의 필터링 로직
+    if is_uncensored_mode:
         status_to_record = None
         if not original_filename_pid:
             status_to_record = "SKIPPED_UNCEN_NO_PID"
@@ -1469,16 +1544,20 @@ async def process_single_item_for_auto_rematch(item_row: sqlite3.Row, worker_nam
         else:
             label_part = original_filename_pid.split('-', 1)[0]
             matchable_labels = CONFIG.get("UNCENSORED_MATCHABLE_LABELS", [])
+            
+            # 매칭 대상 레이블이 아니면 건너뛰기
             if label_part not in matchable_labels:
                 status_to_record = f"SKIPPED_UNCEN_UNMATCHABLE_LABEL ({label_part})"
                 logger.info(f"  ID {item_id}: [무수정] 레이블 '{label_part}'는 매칭 대상이 아니므로 건너뜁니다.")
         
-        # 건너뛰기 조건에 해당하면, DB 기록 후 즉시 함수 종료
+        # 건너뛰기 조건에 해당하면 종료
         if status_to_record:
             if not CONFIG.get("DRY_RUN"):
                 await await_sync(record_completed_task, item_id, status=status_to_record)
-            logger.info(f"[{worker_name_for_log}] ID {item_id} 처리 완료. 소요 시간: {time.monotonic() - start_time:.2f}초. (상태: {status_to_record})")
-            return False # API 변경 없음
+            
+            total_item_processing_time = time.monotonic() - start_time
+            logger.info(f"[{worker_name_for_log}] ID {item_id} 처리 완료. 소요 시간: {total_item_processing_time:.2f}초. (상태: {status_to_record})")
+            return False
 
     normalized_original_file_pid_for_comp = normalize_pid_for_comparison(original_filename_pid) # 비교용 (예: "alpha00001")
     if normalized_original_file_pid_for_comp:
@@ -1643,6 +1722,11 @@ async def process_single_item_for_auto_rematch(item_row: sqlite3.Row, worker_nam
     finally:
         total_item_processing_time = time.monotonic() - start_time
         logger.info(f"[{worker_name_for_log}] ID {item_id} 처리 완료. 소요 시간: {total_item_processing_time:.2f}초.")
+        if not is_rematch_success and not SHUTDOWN_REQUESTED:
+            failure_interval = CONFIG.get("MATCH_FAILURE_INTERVAL", 3)
+            if failure_interval > 0:
+                # logger.debug(f"[{worker_name_for_log}] 매칭 실패/건너뜀. {failure_interval}초 대기...")
+                await asyncio.sleep(failure_interval)
 
     return api_changed_flag # API 변경 여부 반환
 
@@ -2055,9 +2139,16 @@ async def run_interactive_search_and_rematch_mode(args):
         selected_indices_from_user_input_actual = set()
         user_input_str_val = ""
         try:
-            user_input_str_val = await asyncio.get_running_loop().run_in_executor( None, input, "\n재매칭할 항목의 번호(들) (쉼표/하이픈 범위, 예: 1,3,5-7), 'all'(전체), 또는 'q'(모드종료): ")
-            user_input_str_val = user_input_str_val.lower().strip()
-        except EOFError: logger.warning("EOFError: 사용자 입력을 받을 수 없습니다. 모드를 종료합니다."); user_has_quit_this_mode = True; break
+            prompt = "\n재매칭할 항목의 번호(들) (쉼표/하이픈, q) [default: all]: "
+            user_input_str_val = (await asyncio.get_running_loop().run_in_executor(None, input, prompt)).lower().strip()
+            
+            if not user_input_str_val:
+                user_input_str_val = 'all'
+
+        except (EOFError, KeyboardInterrupt):
+            logger.warning("EOFError: 사용자 입력을 받을 수 없습니다. 모드를 종료합니다.")
+            user_has_quit_this_mode = True
+            break
         except Exception as e_input_search: logger.error(f"입력 처리 중 오류: {e_input_search}. 모드를 종료합니다.", exc_info=True); user_has_quit_this_mode = True; break
 
         if user_input_str_val == 'q': logger.info("사용자 요청('q')으로 현재 모드를 중단합니다."); user_has_quit_this_mode = True; break
@@ -2101,11 +2192,15 @@ async def run_interactive_search_and_rematch_mode(args):
                     f"  (M) 수동 매칭 (각 항목별로 매칭 후보 직접 선택)\n"
                     f"  (D) Plex Dance (라이브러리에서 완전히 제거 후 재추가)\n"
                     f"  (C) 취소 (항목 선택으로 돌아가기)\n"
-                    f"입력 (A/M/D/C): "
+                    f"입력 [A/m/d/c]: "
                 )
                 match_mode_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt_message)
                 match_mode_choice = match_mode_input.lower().strip()
-                if match_mode_choice not in ['a', 'm', 'd', 'c']: # <-- 'd' 추가
+                
+                if not match_mode_choice:
+                    match_mode_choice = 'a'
+
+                if match_mode_choice not in ['a', 'm', 'd', 'c']:
                     logger.warning("잘못된 입력입니다. A, M, D, C 중 하나를 입력하세요.")
                     match_mode_choice = '' 
             except EOFError: user_has_quit_this_mode = True; break
@@ -2327,8 +2422,12 @@ async def run_interactive_search_and_rematch_mode(args):
 
                 fallback_choice_input = ''
                 try:
-                    fb_prompt_auto = f"위 {len(unique_items_for_manual_fallback)}개 항목에 대해 수동 매칭을 진행하시겠습니까? (Y/N): "
+                    fb_prompt_auto = f"위 {len(unique_items_for_manual_fallback)}개 항목에 대해 수동 매칭을 진행하시겠습니까? [Y/n]: "
                     fallback_choice_input = (await asyncio.get_running_loop().run_in_executor(None, input, fb_prompt_auto)).lower().strip()
+                    
+                    if not fallback_choice_input:
+                        fallback_choice_input = 'y'
+
                 except EOFError: user_has_quit_this_mode = True
                 except Exception as e_fb_input: logger.error(f"폴백 선택 입력 오류: {e_fb_input}"); user_has_quit_this_mode = True
                 
@@ -3009,9 +3108,13 @@ async def run_fix_labels_mode(args):
         selected_indices_to_process_fix_actual = set()
         user_input_raw_str_fix = ""
         try:
-            user_input_raw_str_fix = await asyncio.get_running_loop().run_in_executor(
-                None, input, "\n재매칭할 항목의 번호(들) (쉼표/하이픈 범위, 예: 1,3,5-7), 'all'(전체), 또는 'q'(모드종료): ")
+            prompt = "\n재매칭할 항목의 번호(들) (쉼표/하이픈, q) [default: all]: "
+            user_input_raw_str_fix = await asyncio.get_running_loop().run_in_executor(None, input, prompt)
             user_input_raw_str_fix = user_input_raw_str_fix.lower().strip()
+            
+            if not user_input_raw_str_fix:
+                user_input_raw_str_fix = 'all'
+
         except (EOFError, KeyboardInterrupt):
             logger.warning("\n입력 중단. 모드를 종료합니다.")
             user_has_quit_interaction_fix = True
@@ -3068,10 +3171,14 @@ async def run_fix_labels_mode(args):
                     f"  (M) 수동 매칭 (언매치 후 재매칭)\n"
                     f"  (D) Plex Dance (라이브러리에서 완전히 제거 후 재추가)\n"
                     f"  (C) 취소 (항목 선택으로 돌아가기)\n"
-                    f"입력 (A/M/D/C): "
+                    f"입력 [A/m/d/c]: " # 대문자 A가 디폴트
                 )
                 match_mode_input_fix = await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg_fix)
                 match_mode_choice_fix = match_mode_input_fix.lower().strip()
+                
+                if not match_mode_choice_fix:
+                    match_mode_choice_fix = 'a'
+
                 if match_mode_choice_fix not in ['a', 'm', 'd', 'c']:
                     logger.warning("잘못된 입력입니다. A, M, D, C 중 하나를 입력하세요.")
                     match_mode_choice_fix = ''
@@ -3279,8 +3386,12 @@ async def run_fix_labels_mode(args):
 
                 fallback_choice_input_fix = ''
                 try:
-                    fb_prompt_auto_fix = f"위 {len(unique_items_for_manual_fallback_fix)}개 항목에 대해 수동 매칭을 진행하시겠습니까? (Y/N): "
+                    fb_prompt_auto_fix = f"위 {len(unique_items_for_manual_fallback_fix)}개 항목에 대해 수동 매칭을 진행하시겠습니까? [Y/n]: "
                     fallback_choice_input_fix = (await asyncio.get_running_loop().run_in_executor(None, input, fb_prompt_auto_fix)).lower().strip()
+                    
+                    if not fallback_choice_input_fix:
+                        fallback_choice_input_fix = 'y'
+
                 except EOFError: user_has_quit_interaction_fix = True
                 except Exception as e_fb_input_fix: logger.error(f"폴백 선택 입력 오류: {e_fb_input_fix}"); user_has_quit_interaction_fix = True
 
@@ -3434,9 +3545,13 @@ async def run_no_poster_mode(args):
         # --- 3. 사용자 입력 받기 (아이템 선택) ---
         user_input = ""
         try:
-            user_input = await asyncio.get_running_loop().run_in_executor(
-                None, input, "\n처리할 항목의 번호(들) (쉼표/하이픈 범위), 'all'(전체), 또는 'q'(모드종료): ")
+            prompt = "\n처리할 항목의 번호(들) (쉼표/하이픈, q) [default: all]: "
+            user_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt)
             user_input = user_input.lower().strip()
+            
+            if not user_input:
+                user_input = 'all'
+
         except (EOFError, KeyboardInterrupt):
             logger.warning("\n입력 중단. 모드를 종료합니다.")
             break
@@ -3489,10 +3604,14 @@ async def run_no_poster_mode(args):
                     f"  (M) 수동 매칭 (언매치 후 재매칭)\n"
                     f"  (D) Plex Dance (라이브러리에서 완전히 제거 후 재추가)\n"
                     f"  (C) 취소 (항목 선택으로 돌아가기)\n"
-                    f"입력 (A/M/D/C): "
+                    f"입력 [A/m/d/c]: " # 대문자 A가 디폴트
                 )
                 mode_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg)
                 match_mode_choice = mode_input.lower().strip()
+                
+                if not match_mode_choice:
+                    match_mode_choice = 'a'
+
                 if match_mode_choice not in ['a', 'm', 'd', 'c']:
                     logger.warning("잘못된 입력입니다. A, M, D, C 중 하나를 입력하세요.")
                     match_mode_choice = ''
@@ -3681,9 +3800,13 @@ async def run_move_no_meta_mode(args):
         # 사용자 입력 받기
         user_input = ""
         try:
-            prompt = "\n이동할 항목의 번호(들) (쉼표/하이픈 범위), 'all'(전체), 또는 'q'(모드종료): "
+            prompt = "\n이동할 항목의 번호(들) (쉼표/하이픈, q) [default: all]: "
             user_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt)
             user_input = user_input.lower().strip()
+            
+            if not user_input:
+                user_input = 'all'
+
         except (EOFError, KeyboardInterrupt):
             logger.warning("\n입력 중단. 모드를 종료합니다.")
             break
@@ -3723,12 +3846,17 @@ async def run_move_no_meta_mode(args):
         # 최종 확인
         final_confirm = ""
         try:
-            final_confirm_prompt = f"\n경고: 선택된 {len(items_to_process)}개 아이템을 '{move_path}'로 이동하고 라이브러리에서 영구히 제거합니다. 계속하시겠습니까? (yes/no): "
+            final_confirm_prompt = f"\n경고: 선택된 ... 계속하시겠습니까? [y/N]: "
             final_confirm = await asyncio.get_running_loop().run_in_executor(None, input, final_confirm_prompt)
             final_confirm = final_confirm.lower().strip()
+            
+            # 디폴트는 'n' (안전 제일)
+            if not final_confirm:
+                final_confirm = 'n'
+
         except (EOFError, KeyboardInterrupt): break
 
-        if final_confirm != 'yes':
+        if final_confirm != 'y':
             logger.info("작업을 취소했습니다.")
             continue
 
@@ -3819,9 +3947,13 @@ async def run_force_complete_mode(args):
         # 3. 사용자 입력 받기
         user_input = ""
         try:
-            prompt = "\n완료 처리할 항목의 번호(들) (쉼표/하이픈, all, q): "
+            prompt = "\n완료 처리할 항목의 번호(들) (쉼표/하이픈, q) [default: all]: "
             user_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt)
             user_input = user_input.lower().strip()
+            
+            if not user_input:
+                user_input = 'all'
+
         except (EOFError, KeyboardInterrupt):
             logger.warning("\n입력 중단. 모드를 종료합니다."); break
 
@@ -3977,8 +4109,9 @@ async def run_update_actors_mode(args):
 
             user_input = ""
             try:
-                prompt = "\n새로고침할 항목 번호(들) (all, 목록 새로고침 R, 종료 Q): "
+                prompt = "\n새로고침할 항목 번호(들) (all, 목록 새로고침 R, 종료 Q) [default: all]: "
                 user_input = (await asyncio.get_running_loop().run_in_executor(None, input, prompt)).lower().strip()
+                if not user_input: user_input = 'all'
             except (EOFError, KeyboardInterrupt): user_input = 'q'
 
             if user_input == 'q':
@@ -4279,13 +4412,15 @@ async def run_find_dupes_mode(args):
             try:
                 prompt_msg = (
                     f"\n선택된 {len(groups_to_process)}개 그룹에 대해 어떤 작업을 하시겠습니까?\n"
-                    f"  (M) 수동 병합/재매칭 (각 그룹을 하나씩 처리)\n"
-                    f"  (D) Plex Dance (그룹 내 모든 아이템에 대해 실행)\n"
-                    f"  (C) 취소 (그룹 선택으로 돌아가기)\n"
-                    f"입력 (M/D/C): "
+                    f"  (M) 수동 병합/재매칭 (각 그룹을 하나씩 처리. 디폴트)\n"
+                    f"  (d) Plex Dance (그룹 내 모든 아이템에 대해 실행)\n"
+                    f"  (c) 취소 (그룹 선택으로 돌아가기)\n"
+                    f"입력 (M/d/c): "
                 )
                 action_input = await asyncio.get_running_loop().run_in_executor(None, input, prompt_msg)
                 action_choice = action_input.lower().strip()
+                if not action_choice: action_choice = 'm'
+
                 if action_choice not in ['m', 'd', 'c']:
                     logger.warning("잘못된 입력입니다."); action_choice = ''
             except (EOFError, KeyboardInterrupt):
@@ -4328,9 +4463,10 @@ async def run_find_dupes_mode(args):
                 while True:
                     if SHUTDOWN_REQUESTED: break
                     try:
-                        choice_prompt = "  재매칭할 아이템 번호를 선택하세요 (모두 재매칭: all, 이 그룹 건너뛰기: s): "
+                        choice_prompt = "  재매칭할 아이템 번호를 선택하세요 (모두: all, 건너뛰기: s) [default: all]: "
                         item_choice_str = await asyncio.get_running_loop().run_in_executor(None, input, choice_prompt)
                         item_choice_str = item_choice_str.strip().lower()
+                        if not item_choice_str: item_choice_str = 'all'
 
                         if item_choice_str == 's':
                             item_to_rematch = None; break
@@ -4507,9 +4643,12 @@ async def run_analyze_missing_mode(args):
     # 사용자 확인
     try:
         confirm = await asyncio.get_running_loop().run_in_executor(
-            None, input, f"\n위 {len(unanalized_items)}개 항목에 대해 미디어 분석을 실행하시겠습니까? (Y/N): "
+            None, input, f"\n위 {len(unanalized_items)}개 항목에 대해 미디어 분석을 실행하시겠습니까? (Y/n): "
         )
-        if confirm.lower().strip() != 'y':
+        confirm = confirm.lower().strip()
+        if not confirm: confirm = 'y'
+
+        if confirm != 'y':
             logger.info("작업을 취소했습니다.")
             return
     except (EOFError, KeyboardInterrupt):

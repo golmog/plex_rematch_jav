@@ -171,6 +171,9 @@ JAV_PARSING_RULES:
     # 10musume
     - '.*?(?<![0-9])(10mu|10musume)[-_\s]?(\d{6})[-_](\d{2,3})(?=[^\d]|\b).*? => 10mu|{1}_{2}'
     - '.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?(10mu|10musume)\b.*? => 10mu|{0}_{1}'
+    # Pacopacomama
+    - '.*?(?<![a-z])(paco|pacopacom|pacopacomama)[-_\s]?(\d{6})[-_](\d{2,3})(?=[^\d]|\b).*? => paco|{1}_{2}'
+    - '.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?(paco|pacopacom|pacopacomama)\b.*? => paco|{0}_{1}'
     # Carib
     - '.*?(?<![a-z])carib(bean)?(com)?[-_\s]?(\d{6})[-_]?(\d{2,3})(?=[^\d]|\b).*? => carib|{2}-{3}'
     - '.*?(?<![0-9])(\d{6})[-_](\d{2,3})[-_\s]?carib(bean)?(com)?\b.*? => carib|{0}-{1}'
@@ -211,4 +214,18 @@ SITE_CODE_MAP:
   javdb:
     - CJ
     - YMCJ
-
+  1pon:
+    - ED
+    - YMED
+  10mu:
+    - EM
+    - YMEM
+  carib:
+    - EC
+    - YMEC
+  fc2:
+    - EF
+    - YMEF
+  paco:
+    - EP
+    - YMEP
