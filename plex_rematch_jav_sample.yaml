@@ -39,6 +39,12 @@ PLEX_DANCE_EMPTY_TRASH_INTERVAL: 5
 COMPLETION_DB: "plex_rematch_jav.db"
 # 예시 (절대 경로): COMPLETION_DB: "/home/user/scripts/plex_rematch_jav.db"
 
+# 로깅 설정
+LOG_FILE_PATH: "plex_rematch_jav.log" # 기본값: 스크립트와 같은 경로
+LOG_LEVEL: "INFO" # 기본 로그 레벨 (DEBUG, INFO, WARNING, ERROR)
+LOG_ROTATION_SIZE_MB: 10 # 로그 파일 하나당 최대 크기 (MB)
+LOG_BACKUP_COUNT: 5 # 유지할 백업 로그 파일 개수
+
 # 동시에 실행할 작업자(워커) 수 (자동 재매칭 모드용)
 WORKERS: 2
 
@@ -226,6 +232,9 @@ SITE_CODE_MAP:
   fc2:
     - EF
     - YMEF
+  heyzo:
+    - EH
+    - YMEH
   paco:
     - EP
     - YMEP

@@ -15,6 +15,7 @@ import sys
 import os
 import re
 import logging
+import logging.handlers
 import signal
 import shutil
 from datetime import datetime
@@ -58,6 +59,11 @@ FALLBACK_DEFAULT_CONFIG = {
     "PLEX_URL": "http://127.0.0.1:32400",
     "PLEX_TOKEN": None, # YAML 또는 CLI에서 필수로 받아야 함
 
+    "LOG_FILE_PATH": os.path.join(SCRIPT_DIR, "plex_rematch_jav.log"), # 기본값: 스크립트와 같은 경로
+    "LOG_LEVEL": "INFO", # 기본 로그 레벨 (DEBUG, INFO, WARNING, ERROR)
+    "LOG_ROTATION_SIZE_MB": 10, # 로그 파일 하나당 최대 크기 (MB)
+    "LOG_BACKUP_COUNT": 5, # 유지할 백업 로그 파일 개수
+
     "PLEX_DANCE_TEMP_PATH": None,
     "PLEX_DANCE_REAPPEAR_TIMEOUT": 600,
     "PLEX_DANCE_REAPPEAR_INTERVAL": 10,
@@ -86,6 +92,12 @@ FALLBACK_DEFAULT_CONFIG = {
         "jav321": ["CT", "YMCT"],
         "javbus": ["CB", "YMCB"],
         "javdb": ["CJ", "YMCJ"],
+        "1pon": ["ED", "YMED"],
+        "10mu": ["EM", "YMEM"],
+        "carib": ["EC", "YMEC"],
+        "fc2": ["EF", "YMEF"],
+        "heyzo": ["EH", "YMEH"],
+        "paco": ["EP", "YMEP"],
     },
 
     "JAV_PARSING_RULES": {
@@ -161,18 +173,70 @@ PLEX_SECTION_TYPE_VALUES = {1: "영화", 13: "사진"}
 MATCH_CANDIDATE_EXCLUDED_GUID_PREFIXES = ['collection://']
 
 def setup_logging(verbosity: int):
-    log_level = logging.INFO # 기본값은 INFO
-    if verbosity == 1: # -v 하나면 INFO 유지 (이미 기본값)
-        log_level = logging.INFO
-    elif verbosity >= 2: # -vv 이상이면 DEBUG
-        log_level = logging.DEBUG
+    # 1. 설정에서 로그 레벨 결정
+    config_level_str = CONFIG.get("LOG_LEVEL", "INFO").upper()
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR
+    }
+    base_level = level_map.get(config_level_str, logging.INFO)
 
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s %(levelname)-6s: %(message)s',
-        datefmt='%Y/%m/%d %H:%M:%S',
-        stream=sys.stdout
+    # 2. CLI 옵션(-v, -vv)이 있으면 우선순위 높임 (DEBUG로 강제)
+    if verbosity >= 1:
+        base_level = logging.DEBUG
+    
+    # 3. 루트 로거 설정
+    root_logger = logging.getLogger()
+    root_logger.setLevel(base_level)
+    
+    # 기존 핸들러 제거 (중복 방지)
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+
+    # 4. 포맷터 정의
+    formatter = logging.Formatter(
+        '%(asctime)s %(levelname)-6s: %(message)s',
+        datefmt='%Y/%m/%d %H:%M:%S'
     )
+
+    # 5. 콘솔 핸들러 (StreamHandler)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(base_level)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # 6. 파일 핸들러 (RotatingFileHandler)
+    log_file_path = CONFIG.get("LOG_FILE_PATH")
+    if log_file_path:
+        try:
+            # 경로가 없으면 생성 시도
+            log_dir = os.path.dirname(log_file_path)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+
+            max_bytes = int(CONFIG.get("LOG_ROTATION_SIZE_MB", 10)) * 1024 * 1024
+            backup_count = int(CONFIG.get("LOG_BACKUP_COUNT", 5))
+
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_file_path, 
+                maxBytes=max_bytes, 
+                backupCount=backup_count,
+                encoding='utf-8'
+            )
+            file_handler.setLevel(base_level)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+            
+            # 초기 로그 기록
+            root_logger.info(f"로그 파일 기록 시작: {log_file_path}")
+            
+        except Exception as e:
+            # 파일 로깅 실패 시 콘솔에만 경고하고 진행
+            root_logger.warning(f"로그 파일 생성 실패 ({log_file_path}): {e}")
+
+    # 7. 외부 라이브러리 로그 레벨 조정 (너무 시끄러운 로그 방지)
     for lib_name in ["requests", "urllib3", "plexapi"]:
         logging.getLogger(lib_name).setLevel(logging.WARNING)
 
@@ -2524,9 +2588,9 @@ async def run_auto_rematch_mode(args):
 
     logger.info("--- 스크립트 설정 (자동 재매칭 모드) ---")
     for k_conf, v_conf in CONFIG.items():
-        if k_conf == "PLEX_TOKEN" and v_conf: logger.info(f"  - {k_conf}: ***") # 토큰 값은 숨김
+        if k_conf == "PLEX_TOKEN" and v_conf: logger.debug(f"  - {k_conf}: ***") # 토큰 값은 숨김
         elif k_conf.startswith("QUERY_") or k_conf == "verbose": continue
-        else: logger.info(f"  - {k_conf}: {v_conf}")
+        else: logger.debug(f"  - {k_conf}: {v_conf}")
     if CONFIG.get("DRY_RUN"): logger.warning("*** DRY RUN 모드 활성화됨 ***")
 
     await await_sync(create_table_if_not_exists) # 완료 DB 테이블 생성
@@ -4684,7 +4748,7 @@ async def main():
     info_group.add_argument("--clean-db", action="store_true", help="Plex 라이브러리에 더 이상 존재하지 않는 아이템의 기록을 정리하고 DB를 최적화(VACUUM)합니다.")
 
     rematch_group = parser.add_argument_group('재매칭 및 필터링 옵션')
-    rematch_group.add_argument("--section-id", type=int, dest="id", help="[필수] 작업 대상 라이브러리 섹션 ID")
+    rematch_group.add_argument("--section-id", "--section", type=int, dest="id", help="[필수] 작업 대상 라이브러리 섹션 ID")
     rematch_group.add_argument("--config", type=str, default=DEFAULT_YAML_CONFIG_PATH, 
                                help=f"사용자 설정 YAML 파일 경로 (기본값: 스크립트 디렉터리 내 {os.path.basename(DEFAULT_YAML_CONFIG_PATH)})")
     # 나머지 rematch_group 인자들은 default를 FALLBACK_DEFAULT_CONFIG에서 가져오지 않고, 나중에 병합 시 처리
@@ -4741,8 +4805,8 @@ async def main():
         except (NotImplementedError, AttributeError): # Windows 등 일부 환경에서는 미지원
             signal.signal(sig_name_enum, functools.partial(handle_signal, sig_name_enum, None))
 
-    # 로깅 설정 (우선 실행)
-    setup_logging(args.verbose)
+    # 초기 로깅 설정 (콘솔만, 기본 레벨)
+    logging.basicConfig(level=logging.INFO, format='%(message)s') # 간단하게 시작
 
     # YAML 설정 파일 로드
     yaml_config_data = load_yaml_config(args.config)
@@ -4752,14 +4816,13 @@ async def main():
     yaml_file_dir = os.path.dirname(yaml_file_abs_path)
 
     # 경로 관련 설정 키 목록 (예시)
-    path_keys_in_config = ["COMPLETION_DB", "PLEX_DB"]
+    path_keys_in_config = ["COMPLETION_DB", "PLEX_DB", "ACTORS_DB_PATH", "LOG_FILE_PATH"]
 
     for key in path_keys_in_config:
         if key in yaml_config_data and yaml_config_data[key] is not None:
             original_path = yaml_config_data[key]
             if not os.path.isabs(original_path):
                 resolved_path = os.path.abspath(os.path.join(yaml_file_dir, original_path))
-                logger.debug(f"YAML 내 상대 경로 '{original_path}' (키: {key})를 '{resolved_path}' (절대 경로)로 변환합니다.")
                 yaml_config_data[key] = resolved_path
 
     # 설정 병합: 1. FALLBACK -> 2. YAML -> 3. CLI
@@ -4791,6 +4854,9 @@ async def main():
             pass
 
     CONFIG.update(merged_config)
+
+    # 최종 로깅 설정 (파일 포함, 설정된 레벨 적용)
+    setup_logging(args.verbose)
 
     try:
         guid_prefix = CONFIG.get("SJVA_AGENT_GUID_PREFIX", "com.plexapp.agents.sjva_agent://")
