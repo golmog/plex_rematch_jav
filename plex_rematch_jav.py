@@ -2660,10 +2660,18 @@ async def run_auto_rematch_mode(args):
 
     worker_async_tasks = []
     num_concurrent_workers = min(CONFIG.get("WORKERS",1), items_added_count)
-    logger.info(f"{num_concurrent_workers}개의 워커를 시작합니다...")
+    
+    worker_stagger_delay = CONFIG.get("MATCH_INTERVAL", 2)
+    if worker_stagger_delay < 0.5: worker_stagger_delay = 0.5
+
+    logger.info(f"{num_concurrent_workers}개의 워커를 순차적으로 시작합니다 (간격: {worker_stagger_delay:.1f}초)...")
+    
     for i_worker in range(num_concurrent_workers):
         worker_task = asyncio.create_task(worker_task_loop(item_processing_q, f"Worker-{i_worker+1}"))
         worker_async_tasks.append(worker_task)
+        
+        if i_worker < num_concurrent_workers - 1:
+            await asyncio.sleep(worker_stagger_delay)
 
     # 진행 상황 표시 로직
     total_items_to_process_in_queue_initially = items_added_count # 큐에 처음 추가된 아이템 수
