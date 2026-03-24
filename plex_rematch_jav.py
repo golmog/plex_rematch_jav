@@ -4646,6 +4646,60 @@ async def run_clean_db_mode(args):
     logger.info("--clean-db 작업이 완료되었습니다.")
 
 
+async def run_reset_section_mode(section_id: int):
+    """특정 라이브러리 섹션에 속한 아이템들의 매칭 완료 기록을 초기화합니다."""
+    global CONFIG
+    
+    logger.info(f"섹션 ID {section_id}의 매칭 완료 기록을 초기화를 준비합니다...")
+
+    # 완료 테이블이 없으면 생성 (에러 방지)
+    await await_sync(create_table_if_not_exists)
+
+    # 1. Plex DB에서 해당 섹션의 모든 metadata_id 가져오기
+    query_plex = "SELECT id FROM metadata_items WHERE library_section_id = ?"
+    items = await await_sync(fetch_all, query_plex, (str(section_id),))
+
+    if not items:
+        logger.info(f"Plex DB에서 섹션 ID {section_id}에 해당하는 아이템을 찾을 수 없습니다.")
+        return
+
+    metadata_ids = [row['id'] for row in items]
+    logger.info(f"Plex DB에서 해당 섹션의 아이템 {len(metadata_ids)}개를 찾았습니다.")
+
+    # 사용자 확인 (안전장치)
+    try:
+        confirm = await asyncio.get_running_loop().run_in_executor(
+            None, input, f"정말 섹션 ID {section_id}의 스크립트 완료 기록을 초기화하시겠습니까? (다시 처음부터 매칭하게 됩니다) [y/N]: "
+        )
+        if confirm.lower().strip() != 'y':
+            logger.info("초기화 작업이 취소되었습니다.")
+            return
+    except (EOFError, KeyboardInterrupt):
+        logger.info("\n초기화 작업이 취소되었습니다.")
+        return
+
+    # 2. Completion DB에서 해당 ID들의 기록 삭제하는 내부 함수
+    @require_cursor("COMPLETION_DB")
+    def delete_section_records(ids_to_delete: List[int], cs: sqlite3.Cursor = None) -> int:
+        # executemany를 사용하여 많은 양의 ID를 안전하게 삭제
+        cs.executemany("DELETE FROM completed_tasks WHERE metadata_id = ?", [(id,) for id in ids_to_delete])
+        return cs.rowcount
+
+    @require_cursor("COMPLETION_DB")
+    def vacuum_db(cs: sqlite3.Cursor = None):
+        cs.execute("VACUUM")
+
+    # 3. 삭제 및 최적화 실행
+    logger.info("스크립트 완료 DB에서 기록을 삭제하는 중...")
+    deleted_count = await await_sync(delete_section_records, metadata_ids)
+    
+    logger.info(f"총 {deleted_count}개의 매칭 완료 기록이 성공적으로 삭제(초기화)되었습니다.")
+
+    logger.info("DB 공간 최적화(VACUUM)를 실행합니다...")
+    await await_sync(vacuum_db)
+    logger.info("초기화 작업이 완료되었습니다.")
+
+
 async def analyze_plex_item(item_id: int) -> bool:
     """Plex API를 통해 아이템의 미디어 분석을 요청합니다."""
     global PLEX_SERVER_INSTANCE, CONFIG
@@ -4754,6 +4808,7 @@ async def main():
     info_group.add_argument("--find-dupes", action="store_true", help="지정된 섹션 내에서 중복된 품번을 가진 아이템들을 찾아 목록으로 보여줍니다.")
     info_group.add_argument("-v", "--verbose", action="count", default=0, help="상세 로깅 수준을 높입니다 (-v: INFO, -vv: DEBUG).")
     info_group.add_argument("--clean-db", action="store_true", help="Plex 라이브러리에 더 이상 존재하지 않는 아이템의 기록을 정리하고 DB를 최적화(VACUUM)합니다.")
+    info_group.add_argument("--reset-section", type=int, metavar="SECTION_ID", help="특정 라이브러리 섹션의 매칭 완료 기록을 초기화합니다 (전체 재매칭용).")
 
     rematch_group = parser.add_argument_group('재매칭 및 필터링 옵션')
     rematch_group.add_argument("--section-id", "--section", type=int, dest="id", help="[필수] 작업 대상 라이브러리 섹션 ID")
@@ -4930,6 +4985,10 @@ async def main():
     if not CONFIG.get("PLEX_TOKEN") or "_YOUR_PLEX_TOKEN_" in CONFIG.get("PLEX_TOKEN",""):
         logger.critical("오류: PLEX_TOKEN이 설정되지 않았거나 기본값입니다. YAML 파일 또는 --plex-token 옵션으로 설정해주세요.")
         sys.exit(1)
+
+    if args.reset_section is not None:
+        await run_reset_section_mode(args.reset_section)
+        sys.exit(0)
 
     if CONFIG.get("CLEAN_DB"):
         await run_clean_db_mode(args)
